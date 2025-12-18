@@ -37,6 +37,149 @@ class WC_Monarch_Admin {
             'side',
             'high'
         );
+
+        // Add shipping address meta box for Monarch orders
+        add_meta_box(
+            'monarch_ach_shipping_details',
+            'Shipping Information',
+            array($this, 'render_shipping_meta_box'),
+            $screen,
+            'normal',
+            'high'
+        );
+    }
+
+    /**
+     * Render shipping address meta box
+     */
+    public function render_shipping_meta_box($post_or_order) {
+        // Handle both HPOS and legacy order storage
+        if ($post_or_order instanceof WC_Order) {
+            $order = $post_or_order;
+        } else {
+            $order = wc_get_order($post_or_order->ID);
+        }
+
+        if (!$order) {
+            echo '<p>Order not found.</p>';
+            return;
+        }
+
+        // Only show for Monarch ACH orders
+        if ($order->get_payment_method() !== 'monarch_ach') {
+            echo '<p>This order was not paid via Monarch ACH.</p>';
+            return;
+        }
+
+        // Get shipping address
+        $shipping_first_name = $order->get_shipping_first_name();
+        $shipping_last_name = $order->get_shipping_last_name();
+        $shipping_company = $order->get_shipping_company();
+        $shipping_address_1 = $order->get_shipping_address_1();
+        $shipping_address_2 = $order->get_shipping_address_2();
+        $shipping_city = $order->get_shipping_city();
+        $shipping_state = $order->get_shipping_state();
+        $shipping_postcode = $order->get_shipping_postcode();
+        $shipping_country = $order->get_shipping_country();
+
+        // Check if shipping address exists
+        $has_shipping = !empty($shipping_address_1) || !empty($shipping_city);
+
+        // Get billing address for comparison/fallback
+        $billing_first_name = $order->get_billing_first_name();
+        $billing_last_name = $order->get_billing_last_name();
+        $billing_company = $order->get_billing_company();
+        $billing_address_1 = $order->get_billing_address_1();
+        $billing_address_2 = $order->get_billing_address_2();
+        $billing_city = $order->get_billing_city();
+        $billing_state = $order->get_billing_state();
+        $billing_postcode = $order->get_billing_postcode();
+        $billing_country = $order->get_billing_country();
+        $billing_email = $order->get_billing_email();
+        $billing_phone = $order->get_billing_phone();
+
+        ?>
+        <div class="monarch-address-details" style="display: flex; gap: 30px; flex-wrap: wrap;">
+            <!-- Billing Address -->
+            <div class="billing-address" style="flex: 1; min-width: 250px;">
+                <h4 style="margin-top: 0; border-bottom: 1px solid #ddd; padding-bottom: 8px;">Billing Address</h4>
+                <p style="margin: 0;">
+                    <strong><?php echo esc_html($billing_first_name . ' ' . $billing_last_name); ?></strong><br>
+                    <?php if ($billing_company): ?>
+                        <?php echo esc_html($billing_company); ?><br>
+                    <?php endif; ?>
+                    <?php echo esc_html($billing_address_1); ?><br>
+                    <?php if ($billing_address_2): ?>
+                        <?php echo esc_html($billing_address_2); ?><br>
+                    <?php endif; ?>
+                    <?php echo esc_html($billing_city . ', ' . $billing_state . ' ' . $billing_postcode); ?><br>
+                    <?php echo esc_html(WC()->countries->countries[$billing_country] ?? $billing_country); ?>
+                </p>
+                <?php if ($billing_email || $billing_phone): ?>
+                <p style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #eee;">
+                    <?php if ($billing_email): ?>
+                        <strong>Email:</strong> <a href="mailto:<?php echo esc_attr($billing_email); ?>"><?php echo esc_html($billing_email); ?></a><br>
+                    <?php endif; ?>
+                    <?php if ($billing_phone): ?>
+                        <strong>Phone:</strong> <a href="tel:<?php echo esc_attr($billing_phone); ?>"><?php echo esc_html($billing_phone); ?></a>
+                    <?php endif; ?>
+                </p>
+                <?php endif; ?>
+            </div>
+
+            <!-- Shipping Address -->
+            <div class="shipping-address" style="flex: 1; min-width: 250px;">
+                <h4 style="margin-top: 0; border-bottom: 1px solid #ddd; padding-bottom: 8px;">Shipping Address</h4>
+                <?php if ($has_shipping): ?>
+                    <p style="margin: 0;">
+                        <strong><?php echo esc_html(($shipping_first_name ?: $billing_first_name) . ' ' . ($shipping_last_name ?: $billing_last_name)); ?></strong><br>
+                        <?php if ($shipping_company): ?>
+                            <?php echo esc_html($shipping_company); ?><br>
+                        <?php endif; ?>
+                        <?php echo esc_html($shipping_address_1); ?><br>
+                        <?php if ($shipping_address_2): ?>
+                            <?php echo esc_html($shipping_address_2); ?><br>
+                        <?php endif; ?>
+                        <?php echo esc_html($shipping_city . ', ' . $shipping_state . ' ' . $shipping_postcode); ?><br>
+                        <?php echo esc_html(WC()->countries->countries[$shipping_country] ?? $shipping_country); ?>
+                    </p>
+                <?php else: ?>
+                    <p style="margin: 0; color: #666; font-style: italic;">
+                        Same as billing address<br>
+                        <small>(or no shipping required for this order)</small>
+                    </p>
+                <?php endif; ?>
+            </div>
+        </div>
+
+        <!-- Shipping Method -->
+        <?php
+        $shipping_methods = $order->get_shipping_methods();
+        if (!empty($shipping_methods)):
+        ?>
+        <div class="shipping-method" style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #ddd;">
+            <h4 style="margin-top: 0;">Shipping Method</h4>
+            <?php foreach ($shipping_methods as $shipping_method): ?>
+                <p style="margin: 0;">
+                    <strong><?php echo esc_html($shipping_method->get_name()); ?></strong>
+                    <?php if ($shipping_method->get_total() > 0): ?>
+                        - <?php echo wc_price($shipping_method->get_total()); ?>
+                    <?php endif; ?>
+                </p>
+            <?php endforeach; ?>
+        </div>
+        <?php endif; ?>
+
+        <style>
+            .monarch-address-details h4 {
+                color: #23282d;
+                font-size: 13px;
+            }
+            .monarch-address-details p {
+                line-height: 1.6;
+            }
+        </style>
+        <?php
     }
 
     /**
