@@ -381,20 +381,46 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 throw new Exception('Transaction failed: ' . $transaction_result['error']);
             }
 
-            $transaction_id = $transaction_result['data']['id'] ?? $transaction_result['data']['_id'] ?? '';
+            // Extract transaction ID - Monarch API may return it in various field names
+            $data = $transaction_result['data'];
+            $transaction_id = $data['id']
+                ?? $data['_id']
+                ?? $data['transactionId']
+                ?? $data['transaction_id']
+                ?? $data['txnId']
+                ?? $data['txn_id']
+                ?? $data['referenceId']
+                ?? $data['reference_id']
+                ?? '';
+
+            // Log the full response for debugging if transaction ID not found
+            $logger = WC_Monarch_Logger::instance();
+            if (empty($transaction_id)) {
+                $logger->warning('Transaction ID not found in response', array(
+                    'order_id' => $order_id,
+                    'response_keys' => array_keys($data),
+                    'full_response' => $data
+                ));
+            } else {
+                $logger->debug('Transaction created successfully', array(
+                    'order_id' => $order_id,
+                    'transaction_id' => $transaction_id
+                ));
+            }
+
             $order->add_order_note('Transaction created - ID: ' . ($transaction_id ?: 'N/A'));
 
             // Save transaction ID to order meta (visible in admin) - HPOS compatible
-            if ($transaction_id) {
-                $order->set_transaction_id($transaction_id);
-                $order->update_meta_data('_monarch_transaction_id', $transaction_id);
-                $order->update_meta_data('_monarch_org_id', $org_id);
-                $order->update_meta_data('_monarch_paytoken_id', $paytoken_id);
-                $order->save();
-            }
+            // Always save even if empty so we can track and debug
+            $order->set_transaction_id($transaction_id ?: 'pending');
+            $order->update_meta_data('_monarch_transaction_id', $transaction_id ?: 'pending');
+            $order->update_meta_data('_monarch_org_id', $org_id);
+            $order->update_meta_data('_monarch_paytoken_id', $paytoken_id);
+            $order->update_meta_data('_monarch_api_response', json_encode($data));
+            $order->save();
 
             // Save transaction data
-            $this->save_transaction_data($order_id, $transaction_result['data'], $org_id, $paytoken_id);
+            $this->save_transaction_data($order_id, $data, $org_id, $paytoken_id);
 
             $order->payment_complete($transaction_id);
             $order->add_order_note('ACH payment processed. Transaction ID: ' . ($transaction_id ?: 'N/A'));
@@ -489,14 +515,25 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
     
     private function save_transaction_data($order_id, $transaction_data, $org_id, $paytoken_id) {
         global $wpdb;
-        
+
         $table_name = $wpdb->prefix . 'monarch_ach_transactions';
-        
+
+        // Extract transaction ID from various possible field names
+        $transaction_id = $transaction_data['id']
+            ?? $transaction_data['_id']
+            ?? $transaction_data['transactionId']
+            ?? $transaction_data['transaction_id']
+            ?? $transaction_data['txnId']
+            ?? $transaction_data['txn_id']
+            ?? $transaction_data['referenceId']
+            ?? $transaction_data['reference_id']
+            ?? 'txn_' . uniqid();
+
         $wpdb->insert(
             $table_name,
             array(
                 'order_id' => $order_id,
-                'transaction_id' => $transaction_data['id'] ?? uniqid(),
+                'transaction_id' => $transaction_id,
                 'monarch_org_id' => $org_id,
                 'paytoken_id' => $paytoken_id,
                 'amount' => $transaction_data['amount'] ?? 0,
