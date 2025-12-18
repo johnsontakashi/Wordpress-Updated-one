@@ -509,7 +509,7 @@ class WC_Monarch_Admin {
     
     private function render_customers_tab() {
         global $wpdb;
-        
+
         // Get users with Monarch data
         $users = get_users(array(
             'meta_query' => array(
@@ -520,11 +520,11 @@ class WC_Monarch_Admin {
             ),
             'number' => 100
         ));
-        
+
         ?>
         <div class="monarch-admin-section">
             <h2>Monarch Customers</h2>
-            
+
             <?php if (empty($users)): ?>
                 <p>No Monarch customers found.</p>
             <?php else: ?>
@@ -533,6 +533,7 @@ class WC_Monarch_Admin {
                         <tr>
                             <th>Customer</th>
                             <th>Email</th>
+                            <th>Billing Address</th>
                             <th>Monarch Org ID</th>
                             <th>Bank Status</th>
                             <th>Connected Date</th>
@@ -545,11 +546,60 @@ class WC_Monarch_Admin {
                             $org_id = get_user_meta($user->ID, '_monarch_org_id', true);
                             $paytoken_id = get_user_meta($user->ID, '_monarch_paytoken_id', true);
                             $connected_date = get_user_meta($user->ID, '_monarch_connected_date', true);
+
+                            // Get billing address from user meta (WooCommerce stores these)
+                            $billing_first_name = get_user_meta($user->ID, 'billing_first_name', true);
+                            $billing_last_name = get_user_meta($user->ID, 'billing_last_name', true);
+                            $billing_address_1 = get_user_meta($user->ID, 'billing_address_1', true);
+                            $billing_address_2 = get_user_meta($user->ID, 'billing_address_2', true);
+                            $billing_city = get_user_meta($user->ID, 'billing_city', true);
+                            $billing_state = get_user_meta($user->ID, 'billing_state', true);
+                            $billing_postcode = get_user_meta($user->ID, 'billing_postcode', true);
+                            $billing_country = get_user_meta($user->ID, 'billing_country', true);
+                            $billing_phone = get_user_meta($user->ID, 'billing_phone', true);
+
+                            // Build billing address string
+                            $billing_address_parts = array();
+                            if ($billing_address_1) {
+                                $billing_address_parts[] = $billing_address_1;
+                            }
+                            if ($billing_address_2) {
+                                $billing_address_parts[] = $billing_address_2;
+                            }
+                            $city_state_zip = array_filter(array($billing_city, $billing_state, $billing_postcode));
+                            if (!empty($city_state_zip)) {
+                                $billing_address_parts[] = implode(', ', $city_state_zip);
+                            }
+                            if ($billing_country) {
+                                $country_name = WC()->countries->countries[$billing_country] ?? $billing_country;
+                                $billing_address_parts[] = $country_name;
+                            }
+
+                            $has_billing_address = !empty($billing_address_1) || !empty($billing_city);
                             ?>
                             <tr>
                                 <td><?php echo esc_html($user->display_name); ?></td>
-                                <td><?php echo esc_html($user->user_email); ?></td>
-                                <td><?php echo esc_html($org_id); ?></td>
+                                <td>
+                                    <a href="mailto:<?php echo esc_attr($user->user_email); ?>">
+                                        <?php echo esc_html($user->user_email); ?>
+                                    </a>
+                                </td>
+                                <td>
+                                    <?php if ($has_billing_address): ?>
+                                        <div class="billing-address-cell">
+                                            <?php if ($billing_first_name || $billing_last_name): ?>
+                                                <strong><?php echo esc_html($billing_first_name . ' ' . $billing_last_name); ?></strong><br>
+                                            <?php endif; ?>
+                                            <?php echo esc_html(implode('<br>', $billing_address_parts)); ?>
+                                            <?php if ($billing_phone): ?>
+                                                <br><small>Phone: <?php echo esc_html($billing_phone); ?></small>
+                                            <?php endif; ?>
+                                        </div>
+                                    <?php else: ?>
+                                        <span style="color:#999;">No billing address</span>
+                                    <?php endif; ?>
+                                </td>
+                                <td><code style="font-size: 11px;"><?php echo esc_html($org_id); ?></code></td>
                                 <td>
                                     <?php if ($paytoken_id): ?>
                                         <span class="status-badge status-completed">Connected</span>
@@ -575,6 +625,16 @@ class WC_Monarch_Admin {
                         <?php endforeach; ?>
                     </tbody>
                 </table>
+
+                <style>
+                    .billing-address-cell {
+                        font-size: 12px;
+                        line-height: 1.4;
+                    }
+                    .billing-address-cell small {
+                        color: #666;
+                    }
+                </style>
             <?php endif; ?>
         </div>
         <?php
