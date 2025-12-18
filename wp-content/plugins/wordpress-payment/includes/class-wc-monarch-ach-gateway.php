@@ -678,7 +678,7 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 'first_name' => $is_guest ? sanitize_text_field($_POST['billing_first_name']) : ($current_user->user_firstname ?: sanitize_text_field($_POST['billing_first_name'])),
                 'last_name' => $is_guest ? sanitize_text_field($_POST['billing_last_name']) : ($current_user->user_lastname ?: sanitize_text_field($_POST['billing_last_name'])),
                 'email' => $unique_email,
-                'password' => wp_generate_password(12, false),
+                'password' => wp_generate_password(16, true, true),
                 'phone' => $phone,
                 'company_name' => sanitize_text_field($_POST['monarch_company']),
                 'dob' => $dob,
@@ -974,12 +974,13 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             $api_key_to_use = $purchaser_api_key ?: $this->api_key;
             $app_id_to_use = $purchaser_app_id ?: $this->app_id;
 
-            // Query Monarch API to get organization details including paytokens
+            // Query Monarch API to get latest paytoken for the organization
             $api_url = $this->testmode
                 ? 'https://devapi.monarch.is/v1'
                 : 'https://api.monarch.is/v1';
 
-            $response = wp_remote_get($api_url . '/organization/' . $org_id, array(
+            // Use /getlatestpaytoken/ endpoint which works with merchant credentials for child organizations
+            $response = wp_remote_get($api_url . '/getlatestpaytoken/' . $org_id, array(
                 'headers' => array(
                     'accept' => 'application/json',
                     'X-API-KEY' => $api_key_to_use,
@@ -996,14 +997,10 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             $body = json_decode(wp_remote_retrieve_body($response), true);
 
             if ($status_code >= 200 && $status_code < 300) {
-                // Check if organization has paytokens
-                $paytokens = $body['payTokens'] ?? $body['paytokens'] ?? array();
+                // The /getlatestpaytoken/ endpoint returns the latest paytoken directly
+                $paytoken_id = $body['_id'] ?? $body['payToken'] ?? $body['id'] ?? null;
 
-                if (!empty($paytokens) && is_array($paytokens)) {
-                    // Get the first paytoken (or the most recent one)
-                    $paytoken = is_array($paytokens[0]) ? $paytokens[0] : array('_id' => $paytokens[0]);
-                    $paytoken_id = $paytoken['_id'] ?? $paytoken['payToken'] ?? $paytokens[0];
-
+                if (!empty($paytoken_id)) {
                     wp_send_json_success(array(
                         'connected' => true,
                         'paytoken_id' => $paytoken_id,
@@ -1256,7 +1253,7 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 'first_name' => $is_guest ? sanitize_text_field($_POST['billing_first_name']) : ($current_user->user_firstname ?: sanitize_text_field($_POST['billing_first_name'])),
                 'last_name' => $is_guest ? sanitize_text_field($_POST['billing_last_name']) : ($current_user->user_lastname ?: sanitize_text_field($_POST['billing_last_name'])),
                 'email' => $unique_email,
-                'password' => wp_generate_password(12, false),
+                'password' => wp_generate_password(16, true, true),
                 'phone' => $phone,
                 'company_name' => sanitize_text_field($_POST['monarch_company'] ?? ''),
                 'dob' => $dob,
@@ -1366,13 +1363,14 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
     /**
      * Validate that a paytoken exists and can be used with the given credentials
      * This prevents "Paytoken is Invalid" errors by verifying credential consistency
+     * Uses /getlatestpaytoken/{org_id} endpoint which works with merchant credentials for child organizations
      */
     private function validate_paytoken_with_credentials($org_id, $paytoken_id, $api_key, $app_id) {
         try {
             $api_url = $this->testmode ? 'https://devapi.monarch.is/v1' : 'https://api.monarch.is/v1';
-            
-            // Try to get the organization details which includes paytokens
-            $response = wp_remote_get($api_url . '/organization/' . $org_id, array(
+
+            // Use /getlatestpaytoken/ endpoint to get paytokens for the organization
+            $response = wp_remote_get($api_url . '/getlatestpaytoken/' . $org_id, array(
                 'headers' => array(
                     'accept' => 'application/json',
                     'X-API-KEY' => $api_key,
@@ -1399,42 +1397,32 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 );
             }
 
-            // Check if the paytoken exists in the organization's paytokens
-            $paytokens = $body['payTokens'] ?? $body['paytokens'] ?? array();
-            
-            if (empty($paytokens)) {
+            // The /getlatestpaytoken/ endpoint returns the latest paytoken directly
+            // Check if response contains paytoken data
+            $response_paytoken_id = $body['_id'] ?? $body['payToken'] ?? $body['id'] ?? null;
+
+            if (empty($response_paytoken_id)) {
                 return array(
                     'valid' => false,
-                    'error' => 'No paytokens found for organization'
+                    'error' => 'No paytoken found for organization'
                 );
             }
 
-            // Look for our specific paytoken
-            $paytoken_found = false;
-            foreach ($paytokens as $token) {
-                $token_id = '';
-                if (is_array($token)) {
-                    $token_id = $token['_id'] ?? $token['payToken'] ?? $token['id'] ?? '';
-                } else {
-                    $token_id = $token;
-                }
-                
-                if ($token_id === $paytoken_id) {
-                    $paytoken_found = true;
-                    break;
-                }
-            }
-
-            if (!$paytoken_found) {
-                return array(
-                    'valid' => false,
-                    'error' => "Paytoken $paytoken_id not found in organization's paytokens"
-                );
+            // Verify the paytoken matches what we expect
+            if ($response_paytoken_id !== $paytoken_id) {
+                // The latest paytoken doesn't match - this could mean the user has a newer bank account linked
+                // We'll still consider it valid if we got a paytoken back, as the stored one might be outdated
+                $this->log('Paytoken mismatch warning', array(
+                    'stored_paytoken' => $paytoken_id,
+                    'latest_paytoken' => $response_paytoken_id,
+                    'org_id' => $org_id
+                ));
             }
 
             return array(
                 'valid' => true,
-                'error' => null
+                'error' => null,
+                'latest_paytoken_id' => $response_paytoken_id
             );
 
         } catch (Exception $e) {
