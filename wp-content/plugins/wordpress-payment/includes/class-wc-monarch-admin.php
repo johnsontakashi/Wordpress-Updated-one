@@ -590,9 +590,13 @@ class WC_Monarch_Admin {
                                             <?php if ($billing_first_name || $billing_last_name): ?>
                                                 <strong><?php echo esc_html($billing_first_name . ' ' . $billing_last_name); ?></strong><br>
                                             <?php endif; ?>
-                                            <?php echo esc_html(implode('<br>', $billing_address_parts)); ?>
+                                            <?php
+                                            foreach ($billing_address_parts as $part) {
+                                                echo esc_html($part) . '<br>';
+                                            }
+                                            ?>
                                             <?php if ($billing_phone): ?>
-                                                <br><small>Phone: <?php echo esc_html($billing_phone); ?></small>
+                                                <small>Phone: <?php echo esc_html($billing_phone); ?></small>
                                             <?php endif; ?>
                                         </div>
                                     <?php else: ?>
