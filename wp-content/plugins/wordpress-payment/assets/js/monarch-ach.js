@@ -186,7 +186,8 @@ jQuery(document).ready(function($) {
         });
     });
 
-    // Open bank connection in a popup window
+    // Open bank connection in IFRAME with redirect detection
+    // When Yodlee redirects after Continue button, opens a new browser window with success page
     function openBankConnectionWindow(connectionUrl, orgId) {
         let url = connectionUrl;
 
@@ -196,74 +197,39 @@ jQuery(document).ready(function($) {
         const currentUrl = window.location.href;
         let locationUrl = currentUrl.split('?')[0]; // Clean URL without query params
 
-        // Build callback URL - use admin-ajax.php which WordPress ALWAYS processes
-        // This prevents 404 errors because admin-ajax.php is a real WordPress file
-        let callbackUrl = monarch_ach_params.ajax_url + '?action=monarch_bank_callback&org_id=' + orgId;
+        // Build callback URL - when Yodlee redirects to this, we'll detect it and open new window
+        let callbackUrl = locationUrl + '?monarch_bank_callback=1&org_id=' + orgId;
 
-        // Clean up URL formatting and replace placeholders properly
+        // Replace placeholders in URL
         if (url.includes('{redirectUrl}') || url.includes('{price}')) {
-            // Replace placeholders with actual values
-            url = url.replace(/\{price\}/g, '100'); // Default price or get from order
-            // Use the callback URL with parameters for better redirect detection
+            url = url.replace(/\{price\}/g, '100');
             url = url.replace(/\{redirectUrl\}/g, encodeURIComponent(callbackUrl));
-
-            console.log('Replaced URL placeholders - redirectUrl:', callbackUrl, 'price: 100');
-        }
-
-        // Add locationURL parameter for Yodlee FastLink postMessage support
-        // This is required for postMessage callbacks to work (especially on localhost)
-        // See: https://developer.yodlee.com/docs/fastlink/4.0/advanced
-        if (!url.includes('locationURL=') && !url.includes('locationUrl=')) {
-            const separator = url.includes('?') ? '&' : (url.includes('#') ? '&' : '?');
-            // For hash-based URLs, we need to add it before the hash or within the hash params
-            if (url.includes('#')) {
-                // Add locationURL to the hash fragment parameters
-                url = url + '&locationURL=' + encodeURIComponent(locationUrl);
-            } else {
-                url = url + separator + 'locationURL=' + encodeURIComponent(locationUrl);
-            }
-            console.log('Added locationURL parameter for postMessage support:', locationUrl);
-        }
-
-        // Fix malformed URLs with multiple hash fragments
-        if (url.includes('#') && url.split('#').length > 2) {
-            const parts = url.split('#');
-            const baseUrl = parts[0];
-            // Join all hash parts with & instead of multiple #
-            let hashFragment = parts.slice(1).join('&');
-            
-            // Clean up any remaining invalid patterns
-            hashFragment = hashFragment.replace(/&+/g, '&').replace(/^&|&$/g, '');
-            
-            url = baseUrl + '#' + hashFragment;
+            console.log('Replaced URL placeholders - redirectUrl:', callbackUrl);
         }
 
         console.log('Final iframe URL:', url);
-        console.log('URL Analysis:', {
-            'hasPlaceholders': url.includes('{'),
-            'isLocalhost': url.includes('localhost'),
-            'isHTTPS': url.startsWith('https'),
-            'hasDoubleEncoding': url.includes('http%3A')
-        });
 
-        // Open modal with toggle between automatic and manual
+        // Store orgId and callback URL globally
+        window.monarchCurrentOrgId = orgId;
+        window.monarchCallbackUrl = callbackUrl;
+
+        // Create modal with IFRAME for bank linking
         const modal = $('<div id="bank-connection-modal">' +
             '<div class="monarch-modal-overlay"></div>' +
-            '<div class="monarch-modal-content">' +
+            '<div class="monarch-modal-content monarch-modal-iframe-content">' +
             '<div class="monarch-modal-header">' +
             '<h3>Connect Your Bank Account</h3>' +
-            '<p>Choose how you want to connect your bank account.</p>' +
             '<button type="button" id="close-bank-modal" class="monarch-modal-close">&times;</button>' +
             '</div>' +
             // Toggle buttons
             '<div class="monarch-modal-toggle">' +
-            '<button type="button" class="monarch-modal-method-btn active" data-method="auto">Automatic</button>' +
+            '<button type="button" class="monarch-modal-method-btn active" data-method="auto">Automatic (Secure)</button>' +
             '<button type="button" class="monarch-modal-method-btn" data-method="manual">Manual Entry</button>' +
             '</div>' +
-            // Automatic section (iframe)
+            // Automatic section - iframe for bank linking
             '<div id="modal-auto-section" class="monarch-modal-section">' +
-            '<div class="monarch-modal-body">' +
-            '<iframe id="bank-linking-iframe" src="' + url + '" sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-top-navigation allow-top-navigation-by-user-activation" onload="handleIframeLoad()" onerror="handleIframeError()"></iframe>' +
+            '<div class="monarch-iframe-container">' +
+            '<iframe id="monarch-bank-iframe" src="' + url + '" frameborder="0" allowfullscreen></iframe>' +
             '</div>' +
             '<div class="monarch-modal-footer">' +
             '<button type="button" id="monarch-bank-connected-btn" class="button alt">I\'ve Connected My Bank</button>' +
@@ -308,8 +274,20 @@ jQuery(document).ready(function($) {
 
         $('body').append(modal);
 
+        // Add CSS for iframe modal
+        if (!$('#monarch-iframe-style').length) {
+            $('head').append('<style id="monarch-iframe-style">' +
+                '.monarch-modal-iframe-content { width: 90%; max-width: 800px; height: 85vh; }' +
+                '.monarch-iframe-container { height: calc(100% - 180px); min-height: 400px; }' +
+                '#monarch-bank-iframe { width: 100%; height: 100%; border: none; background: #fff; }' +
+                '</style>');
+        }
+
         // Close modal handler
         $(document).on('click', '#close-bank-modal', function() {
+            if (window.monarchIframeMonitor) {
+                clearInterval(window.monarchIframeMonitor);
+            }
             window.removeEventListener('message', handleBankMessage);
             $('#bank-connection-modal').remove();
             $('#monarch-connect-bank').prop('disabled', false).text('Connect Bank Account');
@@ -318,6 +296,9 @@ jQuery(document).ready(function($) {
 
         // Close on overlay click
         $(document).on('click', '.monarch-modal-overlay', function() {
+            if (window.monarchIframeMonitor) {
+                clearInterval(window.monarchIframeMonitor);
+            }
             window.removeEventListener('message', handleBankMessage);
             $('#bank-connection-modal').remove();
             $('#monarch-connect-bank').prop('disabled', false).text('Connect Bank Account');
@@ -330,78 +311,96 @@ jQuery(document).ready(function($) {
             checkBankConnectionStatus(orgId);
         });
 
-        // Listen for postMessage from iframe (if Monarch sends one)
+        // Listen for postMessage from iframe
         window.addEventListener('message', handleBankMessage);
 
-        // Add global iframe error handlers
-        window.handleIframeLoad = function() {
-            console.log('Bank linking iframe loaded successfully');
-            // Add visual feedback that iframe loaded
-            $('#bank-linking-iframe').css('border', '2px solid green');
-
-            // Check if iframe redirected to our site (indicates bank linking complete)
-            // This handles the 404 error case where Yodlee redirects to our checkout URL
-            try {
-                const iframe = document.getElementById('bank-linking-iframe');
-                if (iframe && iframe.contentWindow) {
-                    // Try to access iframe location - will throw error if cross-origin
-                    const iframeSrc = iframe.contentWindow.location.href;
-
-                    // If we can access it and it's our domain, bank linking completed
-                    if (iframeSrc && (iframeSrc.includes(window.location.hostname) || iframeSrc.includes('localhost'))) {
-                        console.log('Iframe redirected to our domain - bank linking likely complete');
-                        // Auto-trigger verification after a brief delay
-                        setTimeout(function() {
-                            if ($('#monarch-bank-connected-btn').length && !$('#monarch-bank-connected-btn').prop('disabled')) {
-                                console.log('Auto-triggering bank verification after redirect');
-                                $('#monarch-bank-connected-btn').text('Redirect Detected! Verifying...');
-                                $('#monarch-bank-connected-btn').click();
-                            }
-                        }, 500);
-                    }
-                }
-            } catch (e) {
-                // Cross-origin error - iframe still on Yodlee domain, which is expected
-                console.log('Iframe is on external domain (expected)');
-            }
-        };
-
-        window.handleIframeError = function() {
-            console.log('Bank linking iframe failed to load');
-            showError('Failed to load bank connection. Please try the manual entry option or refresh the page.');
-        };
-
-        // Monitor iframe for navigation changes (backup for redirect detection)
+        // Monitor iframe for navigation events
+        // When Yodlee clicks Continue, it tries to redirect - we detect this and open success window
+        const iframe = document.getElementById('monarch-bank-iframe');
+        let redirectDetected = false;
         let iframeLoadCount = 0;
-        const iframeMonitor = setInterval(function() {
-            const iframe = document.getElementById('bank-linking-iframe');
-            if (!iframe) {
-                clearInterval(iframeMonitor);
+
+        // Handle iframe load events - each load after the first indicates navigation
+        $(iframe).on('load', function() {
+            iframeLoadCount++;
+            console.log('Iframe load event #' + iframeLoadCount);
+
+            // Skip the first load (initial page load)
+            if (iframeLoadCount === 1) {
+                console.log('Initial iframe load - Monarch bank linking page');
                 return;
             }
 
-            // Count load events - multiple loads may indicate navigation
-            iframe.onload = function() {
-                iframeLoadCount++;
-                console.log('Iframe load event #' + iframeLoadCount);
+            // Second or later load means navigation occurred (Continue was clicked)
+            if (!redirectDetected) {
+                redirectDetected = true;
+                console.log('Navigation detected in iframe - opening success window');
 
-                // If iframe loads multiple times, user may have completed flow
-                if (iframeLoadCount >= 2) {
-                    console.log('Multiple iframe loads detected - may indicate completion');
+                // Try to check if we can read the URL (same-origin)
+                try {
+                    const iframeUrl = iframe.contentWindow.location.href;
+                    console.log('Iframe navigated to:', iframeUrl);
+
+                    // If it's our callback URL, open success window
+                    if (iframeUrl.includes('monarch_bank_callback=1') || iframeUrl.includes('localhost')) {
+                        openSuccessWindow(callbackUrl);
+                        return;
+                    }
+                } catch (e) {
+                    // CORS blocked - still open success window since navigation happened
+                    console.log('CORS blocked, but navigation detected - opening success window');
                 }
 
-                // Call the main load handler
-                window.handleIframeLoad();
-            };
-        }, 1000);
+                // Open success window regardless since Continue was clicked
+                openSuccessWindow(callbackUrl);
+            }
+        });
 
-        // Add informational message for localhost development
-        if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
-            var localhostInfo = $('<div class="monarch-localhost-info" style="background:#d1ecf1; border:1px solid #bee5eb; padding:10px; margin:10px; border-radius:4px; font-size:12px;">' +
-                '<strong>Development Mode:</strong> Complete the bank linking process in the iframe, then click "I\'ve Connected My Bank" to verify. ' +
-                'If you experience issues, the <strong>Manual Entry</strong> option is also available.' +
-                '</div>');
-            $('#modal-auto-section .monarch-modal-body').prepend(localhostInfo);
+        // Store reference for cleanup
+        window.monarchIframeLoadCount = iframeLoadCount;
+    }
+
+    // Open success page in a new browser window
+    function openSuccessWindow(callbackUrl) {
+        console.log('Opening success page in new window:', callbackUrl);
+
+        // Open the success page in a new browser window
+        const successWindow = window.open(
+            callbackUrl,
+            'MonarchBankSuccess',
+            'width=500,height=600,left=' + ((screen.width - 500) / 2) + ',top=' + ((screen.height - 600) / 2) + ',scrollbars=yes,resizable=yes'
+        );
+
+        if (successWindow) {
+            // Update modal to show waiting for success window
+            $('.monarch-iframe-container').html(
+                '<div class="monarch-popup-waiting">' +
+                '<div class="monarch-spinner-large"></div>' +
+                '<h4>Bank Linking Complete!</h4>' +
+                '<p>Please confirm in the new window that opened.</p>' +
+                '<p class="monarch-popup-note">If the window was blocked, <a href="#" id="open-success-window">click here to open it</a>.</p>' +
+                '</div>'
+            );
+
+            // Add CSS for spinner if not already added
+            if (!$('#monarch-spinner-style').length) {
+                $('head').append('<style id="monarch-spinner-style">' +
+                    '.monarch-popup-waiting { text-align: center; padding: 40px 20px; }' +
+                    '.monarch-spinner-large { width: 50px; height: 50px; border: 4px solid #f3f3f3; border-top: 4px solid #0073aa; border-radius: 50%; animation: monarch-spin 1s linear infinite; margin: 0 auto 20px; }' +
+                    '@keyframes monarch-spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }' +
+                    '.monarch-popup-waiting h4 { margin: 0 0 10px; color: #333; }' +
+                    '.monarch-popup-waiting p { color: #666; margin: 5px 0; }' +
+                    '.monarch-popup-note { font-size: 12px; margin-top: 15px !important; }' +
+                    '</style>');
+            }
+
+            // Handle click to reopen success window
+            $(document).on('click', '#open-success-window', function(e) {
+                e.preventDefault();
+                window.open(callbackUrl, 'MonarchBankSuccess', 'width=500,height=600,scrollbars=yes,resizable=yes');
+            });
+        } else {
+            alert('Please allow popups for this site to complete bank linking.');
         }
     }
 
@@ -732,7 +731,7 @@ jQuery(document).ready(function($) {
     function showBankConnectedUI() {
         $('#monarch-ach-form').html(
             '<div class="monarch-bank-connected">' +
-            '<p><strong>✓ Bank account connected</strong></p>' +
+            '<p><strong> Bank account connected</strong></p>' +
             '<p>Your bank account has been verified. You can now complete your order.</p>' +
             '</div>'
         );

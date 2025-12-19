@@ -231,7 +231,7 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
         
         if ($monarch_org_id && $paytoken_id) {
             echo '<div class="monarch-bank-connected">';
-            echo '<p><strong>✓ Bank account connected</strong></p>';
+            echo '<p><strong> Bank account connected</strong></p>';
             echo '<p><a href="#" id="monarch-disconnect-bank" class="monarch-disconnect-link">Use a different bank account</a></p>';
             echo '<input type="hidden" name="monarch_org_id" value="' . esc_attr($monarch_org_id) . '">';
             echo '<input type="hidden" name="monarch_paytoken_id" value="' . esc_attr($paytoken_id) . '">';
@@ -676,7 +676,7 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
     }
 
     /**
-     * Display transaction details to customers on order view page (My Account → Orders → View)
+     * Display transaction details to customers on order view page (My Account � Orders � View)
      */
     public function display_transaction_details_for_customer($order) {
         // Only show for Monarch ACH payments

@@ -9,6 +9,10 @@
  * point we can intercept the request.
  */
 
+// DEBUG: Log that this mu-plugin is loaded
+error_log('MONARCH MU-PLUGIN: File loaded. REQUEST_URI: ' . ($_SERVER['REQUEST_URI'] ?? 'not set'));
+error_log('MONARCH MU-PLUGIN: QUERY_STRING: ' . ($_SERVER['QUERY_STRING'] ?? 'not set'));
+
 // Simple sanitization function
 function monarch_mu_sanitize($str) {
     $str = strip_tags($str);
@@ -58,8 +62,12 @@ if (!$monarch_mu_is_callback && isset($_SERVER['QUERY_STRING'])) {
     }
 }
 
+// DEBUG: Log callback detection result
+error_log('MONARCH MU-PLUGIN: is_callback=' . ($monarch_mu_is_callback ? 'true' : 'false') . ', org_id=' . $monarch_mu_org_id);
+
 // If this is a callback, output the success page and exit
 if ($monarch_mu_is_callback) {
+    error_log('MONARCH MU-PLUGIN: *** CALLBACK DETECTED - Outputting success page ***');
     // Build URLs
     $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https://' : 'http://';
     $host = isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : 'localhost';
@@ -102,6 +110,9 @@ if ($monarch_mu_is_callback) {
         header('Pragma: no-cache');
         header('Expires: 0');
     }
+
+    // Check if we're in an iframe
+    $in_iframe = isset($_SERVER['HTTP_SEC_FETCH_DEST']) && $_SERVER['HTTP_SEC_FETCH_DEST'] === 'iframe';
 
     // Output the success page
     ?>
@@ -221,6 +232,35 @@ if ($monarch_mu_is_callback) {
             color: #999;
             margin-top: 20px;
         }
+        .open-window-btn {
+            display: inline-block;
+            background: #0073aa;
+            color: white;
+            border: none;
+            padding: 16px 36px;
+            font-size: 17px;
+            font-weight: 600;
+            border-radius: 8px;
+            cursor: pointer;
+            margin-top: 20px;
+            transition: all 0.2s ease;
+            text-decoration: none;
+            width: 100%;
+            max-width: 320px;
+        }
+        .open-window-btn:hover {
+            background: #005a87;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 115, 170, 0.4);
+        }
+        .iframe-message {
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+            color: #856404;
+        }
     </style>
 </head>
 <body>
@@ -228,7 +268,17 @@ if ($monarch_mu_is_callback) {
         <div class="success-icon">✓</div>
         <h1>Bank Linking Complete!</h1>
         <p>Your bank account has been successfully linked.</p>
-        <p>Click the button below to verify and return to checkout.</p>
+
+        <div id="iframe-notice" class="iframe-message" style="display: none;">
+            <strong>Almost done!</strong><br>
+            Click the button below to open a new window and complete the verification.
+        </div>
+
+        <p id="main-instruction">Click the button below to verify and return to checkout.</p>
+
+        <button type="button" id="open-window-btn" class="open-window-btn" style="display: none;">
+            Open Verification Window
+        </button>
 
         <button type="button" id="confirm-connection-btn" class="confirm-btn">
             I've Connected My Bank Account
@@ -250,17 +300,87 @@ if ($monarch_mu_is_callback) {
         var retryCount = 0;
         var retryDelay = 3000;
 
-        // Notify parent window immediately
-        try {
-            if (window.parent && window.parent !== window) {
-                window.parent.postMessage({
-                    type: 'MONARCH_BANK_CALLBACK',
-                    status: 'LANDED',
-                    org_id: orgId
-                }, '*');
+        // Notify opener window (the checkout page) that we've landed
+        function notifyOpener(status, paytokenId) {
+            try {
+                // For popup window - use window.opener
+                if (window.opener && !window.opener.closed) {
+                    window.opener.postMessage({
+                        type: 'MONARCH_BANK_CALLBACK',
+                        status: status,
+                        org_id: orgId,
+                        paytoken_id: paytokenId || null
+                    }, '*');
+                    return true;
+                }
+                // For iframe - use window.parent
+                if (window.parent && window.parent !== window) {
+                    window.parent.postMessage({
+                        type: 'MONARCH_BANK_CALLBACK',
+                        status: status,
+                        org_id: orgId,
+                        paytoken_id: paytokenId || null
+                    }, '*');
+                    return true;
+                }
+            } catch (e) {
+                console.log('Could not notify opener/parent:', e);
             }
-        } catch (e) {
-            console.log('Could not notify parent window:', e);
+            return false;
+        }
+
+        // Notify immediately on page load
+        notifyOpener('LANDED', null);
+
+        // Check if we're inside an iframe
+        var isInIframe = (window.self !== window.top);
+        var currentUrl = window.location.href;
+
+        if (isInIframe) {
+            // We're in an iframe - AUTOMATICALLY open a new browser window
+            document.getElementById('iframe-notice').style.display = 'block';
+            document.getElementById('iframe-notice').innerHTML = '<strong>Opening verification window...</strong><br>Please wait while we open a new window.';
+            document.getElementById('open-window-btn').style.display = 'inline-block';
+            document.getElementById('confirm-connection-btn').style.display = 'none';
+            document.getElementById('main-instruction').textContent = 'A new window is opening...';
+
+            // AUTOMATICALLY open new window after a short delay
+            setTimeout(function() {
+                var newWindow = window.open(currentUrl, 'MonarchBankSuccess', 'width=500,height=650,scrollbars=yes,resizable=yes');
+                if (newWindow) {
+                    // Update UI
+                    document.getElementById('open-window-btn').textContent = 'Window Opened - Complete verification there';
+                    document.getElementById('open-window-btn').disabled = true;
+                    document.getElementById('iframe-notice').innerHTML = '<strong>Window opened!</strong><br>Please complete the verification in the new window that just opened.';
+                    document.getElementById('main-instruction').textContent = 'Complete verification in the new window.';
+
+                    // Notify parent that we opened a new window
+                    notifyOpener('WINDOW_OPENED', null);
+                } else {
+                    // Popup was blocked - show manual button
+                    document.getElementById('iframe-notice').innerHTML = '<strong>Popup blocked!</strong><br>Please click the button below to open the verification window.';
+                    document.getElementById('open-window-btn').textContent = 'Click Here to Open Verification Window';
+                    document.getElementById('open-window-btn').disabled = false;
+                    document.getElementById('main-instruction').textContent = 'Click the button to continue.';
+                }
+            }, 500);
+
+            // Handle manual "Open Window" button click (if popup was blocked)
+            document.getElementById('open-window-btn').addEventListener('click', function() {
+                // Open the same URL in a new window (not iframe)
+                var newWindow = window.open(currentUrl, 'MonarchBankSuccess', 'width=500,height=650,scrollbars=yes,resizable=yes');
+                if (newWindow) {
+                    // Update UI
+                    this.textContent = 'Window Opened - Complete verification there';
+                    this.disabled = true;
+                    document.getElementById('iframe-notice').innerHTML = '<strong>Window opened!</strong><br>Please complete the verification in the new window.';
+
+                    // Notify parent that we opened a new window
+                    notifyOpener('WINDOW_OPENED', null);
+                } else {
+                    alert('Please allow popups for this site to complete bank verification.');
+                }
+            });
         }
 
         document.getElementById('confirm-connection-btn').addEventListener('click', function() {
@@ -354,28 +474,26 @@ if ($monarch_mu_is_callback) {
                     try {
                         var response = JSON.parse(xhr.responseText);
                         if (response.success) {
-                            statusMsg.textContent = 'Success! Redirecting to checkout...';
+                            statusMsg.textContent = 'Success! Closing this window...';
 
+                            // Notify the opener window of success
+                            notifyOpener('SUCCESS', paytokenId);
+
+                            // Try to reload the opener and close this popup
                             try {
-                                if (window.parent && window.parent !== window) {
-                                    window.parent.postMessage({
-                                        type: 'MONARCH_BANK_CALLBACK',
-                                        status: 'SUCCESS',
-                                        org_id: orgId,
-                                        paytoken_id: paytokenId
-                                    }, '*');
-
-                                    try {
-                                        window.parent.location.reload();
-                                    } catch (e) {
-                                        window.location.href = checkoutUrl;
-                                    }
-                                } else {
-                                    window.location.href = checkoutUrl;
+                                if (window.opener && !window.opener.closed) {
+                                    window.opener.location.reload();
+                                    setTimeout(function() {
+                                        window.close();
+                                    }, 500);
+                                    return;
                                 }
                             } catch (e) {
-                                window.location.href = checkoutUrl;
+                                console.log('Could not reload opener:', e);
                             }
+
+                            // Fallback: redirect to checkout
+                            window.location.href = checkoutUrl;
                         } else {
                             showError(response.data || 'Failed to complete bank connection.');
                         }
