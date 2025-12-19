@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Monarch WooCommerce Payment Gateway
  * Description: Monarch Payment Gateway.
- * Version: 1.0.1
+ * Version: 1.0.2
  * Author: Monarch Technologies Inc.
  * License: GPL v2 or later
  * Requires at least: 5.0
@@ -12,450 +12,175 @@
  */
 
 /**
- * IMMEDIATE CALLBACK HANDLER - Must run FIRST, before any other checks
- * This is the ONLY reliable way to prevent 404 errors from bank linking redirects
- *
- * IMPORTANT: This code runs when WordPress loads the plugin file. We check for
- * the callback parameter and output the success page immediately, before
- * WordPress can determine the URL is a 404.
- *
- * We intentionally do NOT check for ABSPATH first for the callback detection,
- * because we need this to run as early as possible.
+ * BANK CALLBACK HANDLER - Runs immediately when plugin loads
+ * This intercepts the bank linking callback URL before WordPress processes it
  */
 
-// Simple sanitization function that works without WordPress
-function monarch_simple_sanitize($str) {
-    // Remove any HTML tags
-    $str = strip_tags($str);
-    // Remove any non-alphanumeric characters except dash and underscore
-    $str = preg_replace('/[^a-zA-Z0-9_\-]/', '', $str);
-    return $str;
-}
+// Check for bank callback parameter
+$_monarch_is_callback = false;
+$_monarch_org_id = '';
 
-// Simple JS escaping function that works without WordPress
-function monarch_esc_js($str) {
-    if (function_exists('esc_js')) {
-        return esc_js($str);
-    }
-    // Escape for JavaScript - escape single quotes, backslashes, and newlines
-    $str = str_replace('\\', '\\\\', $str);
-    $str = str_replace("'", "\\'", $str);
-    $str = str_replace("\n", "\\n", $str);
-    $str = str_replace("\r", "\\r", $str);
-    return $str;
-}
-
-// Check for our callback parameter in multiple ways
-$monarch_is_callback = false;
-$monarch_org_id = '';
-
-// Method 1: Check $_GET directly
 if (isset($_GET['monarch_bank_callback']) && $_GET['monarch_bank_callback'] === '1') {
-    $monarch_is_callback = true;
-    $monarch_org_id = isset($_GET['org_id']) ? monarch_simple_sanitize($_GET['org_id']) : '';
+    $_monarch_is_callback = true;
+    $_monarch_org_id = isset($_GET['org_id']) ? preg_replace('/[^a-zA-Z0-9_\-]/', '', $_GET['org_id']) : '';
 }
 
-// Method 2: Parse REQUEST_URI manually (in case $_GET isn't populated yet)
-if (!$monarch_is_callback && isset($_SERVER['REQUEST_URI'])) {
-    $monarch_request_uri = $_SERVER['REQUEST_URI'];
-    if (strpos($monarch_request_uri, 'monarch_bank_callback=1') !== false) {
-        $monarch_is_callback = true;
-        // Extract org_id from URI
-        if (preg_match('/org_id=([^&]+)/', $monarch_request_uri, $monarch_matches)) {
-            $monarch_org_id = monarch_simple_sanitize(urldecode($monarch_matches[1]));
-        }
+if (!$_monarch_is_callback && isset($_SERVER['REQUEST_URI']) && strpos($_SERVER['REQUEST_URI'], 'monarch_bank_callback=1') !== false) {
+    $_monarch_is_callback = true;
+    if (preg_match('/org_id=([^&]+)/', $_SERVER['REQUEST_URI'], $_matches)) {
+        $_monarch_org_id = preg_replace('/[^a-zA-Z0-9_\-]/', '', urldecode($_matches[1]));
     }
 }
 
-// Method 3: Check QUERY_STRING
-if (!$monarch_is_callback && isset($_SERVER['QUERY_STRING'])) {
-    $monarch_query_string = $_SERVER['QUERY_STRING'];
-    if (strpos($monarch_query_string, 'monarch_bank_callback=1') !== false) {
-        $monarch_is_callback = true;
-        if (preg_match('/org_id=([^&]+)/', $monarch_query_string, $monarch_matches)) {
-            $monarch_org_id = monarch_simple_sanitize(urldecode($monarch_matches[1]));
-        }
-    }
-}
+// If this is a callback, show success page and exit
+if ($_monarch_is_callback) {
+    // Build checkout URL
+    $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https://' : 'http://';
+    $host = isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : 'localhost';
+    $checkout_url = $protocol . $host . '/checkout/';
 
-// If this is a callback request, output the page immediately and exit
-// This happens BEFORE WordPress processes the URL, preventing any 404
-if ($monarch_is_callback) {
-    monarch_output_callback_page($monarch_org_id);
-    exit;
-}
-
-// Standard WordPress security check - only exit for direct access AFTER callback check
-if (!defined('ABSPATH')) {
-    exit;
-}
-
-/**
- * Output the bank callback success page
- * Standalone function that can be called before WordPress is fully loaded
- * IMPORTANT: This function must NOT depend on any WordPress functions when called early
- */
-function monarch_output_callback_page($org_id = '') {
-    // Determine URLs - use WordPress functions if available, otherwise construct manually
-    if (function_exists('wc_get_checkout_url')) {
-        $checkout_url = wc_get_checkout_url();
-    } elseif (function_exists('home_url')) {
-        $checkout_url = home_url('/checkout/');
-    } else {
-        // Construct checkout URL manually from server variables
-        $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https://' : 'http://';
-        $host = isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : 'localhost';
-        $checkout_url = $protocol . $host . '/checkout/';
-    }
-
-    if (function_exists('admin_url')) {
-        $ajax_url = admin_url('admin-ajax.php');
-    } else {
-        // Construct admin-ajax URL manually
-        $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https://' : 'http://';
-        $host = isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : 'localhost';
-        // Try to determine WordPress installation path from current URL
-        $request_uri = isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : '';
-        // Extract the base path (before /checkout or query string)
-        $base_path = preg_replace('/\/checkout.*$|\?.*$/', '', $request_uri);
-        $ajax_url = $protocol . $host . $base_path . '/wp-admin/admin-ajax.php';
-    }
-
-    // Generate a simple nonce-like token if WordPress isn't loaded
-    // This will be validated differently on the AJAX handler side
-    if (function_exists('wp_create_nonce')) {
-        $nonce = wp_create_nonce('monarch_ach_nonce');
-    } else {
-        // Create a simple session-based token for early callback
-        if (session_status() === PHP_SESSION_NONE && !headers_sent()) {
-            @session_start();
-        }
-        $nonce = isset($_SESSION['monarch_callback_token']) ? $_SESSION['monarch_callback_token'] : '';
-        if (empty($nonce)) {
-            $nonce = bin2hex(random_bytes(16));
-            $_SESSION['monarch_callback_token'] = $nonce;
-        }
-    }
-
-    // Send proper HTTP headers
+    // Send headers
     if (!headers_sent()) {
         header('HTTP/1.1 200 OK');
         header('Content-Type: text/html; charset=UTF-8');
         header('Cache-Control: no-cache, no-store, must-revalidate');
-        header('Pragma: no-cache');
-        header('Expires: 0');
     }
 
-    ?>
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Bank Linked Successfully</title>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <style>
-            * { box-sizing: border-box; }
-            body {
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-                min-height: 100vh;
-                margin: 0;
-                padding: 20px;
-                background: linear-gradient(135deg, #f0fff4 0%, #e8f5e9 100%);
-            }
-            .success-container {
-                text-align: center;
-                padding: 40px 50px;
-                background: white;
-                border-radius: 16px;
-                box-shadow: 0 10px 40px rgba(0,0,0,0.12);
-                max-width: 480px;
-                width: 100%;
-            }
-            .success-icon {
-                width: 80px;
-                height: 80px;
-                background: #28a745;
-                border-radius: 50%;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                margin: 0 auto 25px;
-                font-size: 40px;
-                color: white;
-            }
-            h1 {
-                color: #1a1a1a;
-                font-size: 26px;
-                margin: 0 0 15px 0;
-                font-weight: 600;
-            }
-            p {
-                color: #666;
-                font-size: 15px;
-                margin: 0 0 10px 0;
-                line-height: 1.5;
-            }
-            .confirm-btn {
-                display: inline-block;
-                background: #28a745;
-                color: white;
-                border: none;
-                padding: 16px 36px;
-                font-size: 17px;
-                font-weight: 600;
-                border-radius: 8px;
-                cursor: pointer;
-                margin-top: 20px;
-                transition: all 0.2s ease;
-                text-decoration: none;
-                width: 100%;
-                max-width: 320px;
-            }
-            .confirm-btn:hover {
-                background: #218838;
-                transform: translateY(-2px);
-                box-shadow: 0 4px 12px rgba(40, 167, 69, 0.4);
-            }
-            .confirm-btn:disabled {
-                background: #6c757d;
-                cursor: not-allowed;
-                transform: none;
-                box-shadow: none;
-            }
-            .spinner {
-                display: none;
-                width: 24px;
-                height: 24px;
-                border: 3px solid #e0e0e0;
-                border-top: 3px solid #28a745;
-                border-radius: 50%;
-                animation: spin 1s linear infinite;
-                margin: 20px auto 0;
-            }
-            @keyframes spin {
-                0% { transform: rotate(0deg); }
-                100% { transform: rotate(360deg); }
-            }
-            .error-message {
-                display: none;
-                color: #dc3545;
-                background: #fff3f3;
-                padding: 12px 16px;
-                border-radius: 8px;
-                margin-top: 20px;
-                font-size: 14px;
-                border: 1px solid #ffcdd2;
-            }
-            .status-message {
-                display: none;
-                color: #0066cc;
-                font-size: 14px;
-                margin-top: 15px;
-                padding: 10px;
-                background: #f0f7ff;
-                border-radius: 6px;
-            }
-            .note {
-                font-size: 12px;
-                color: #999;
-                margin-top: 20px;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="success-container">
-            <div class="success-icon">✓</div>
-            <h1>Bank Linking Complete!</h1>
-            <p>Your bank account has been successfully linked.</p>
-            <p>Click the button below to verify and return to checkout.</p>
+    // Output success page
+    echo '<!DOCTYPE html>
+<html>
+<head>
+    <title>Bank Linked Successfully</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #f0fff4 0%, #e8f5e9 100%);
+        }
+        .success-container {
+            text-align: center;
+            padding: 40px 50px;
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.12);
+            max-width: 480px;
+            width: 100%;
+        }
+        .success-icon {
+            width: 80px;
+            height: 80px;
+            background: #28a745;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 25px;
+            font-size: 40px;
+            color: white;
+        }
+        h1 {
+            color: #1a1a1a;
+            font-size: 26px;
+            margin: 0 0 15px 0;
+            font-weight: 600;
+        }
+        p {
+            color: #666;
+            font-size: 15px;
+            margin: 0 0 10px 0;
+            line-height: 1.5;
+        }
+        .confirm-btn {
+            display: inline-block;
+            background: #28a745;
+            color: white;
+            border: none;
+            padding: 16px 36px;
+            font-size: 17px;
+            font-weight: 600;
+            border-radius: 8px;
+            cursor: pointer;
+            margin-top: 20px;
+            transition: all 0.2s ease;
+            text-decoration: none;
+            width: 100%;
+            max-width: 320px;
+        }
+        .confirm-btn:hover {
+            background: #218838;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(40, 167, 69, 0.4);
+        }
+        .note {
+            font-size: 12px;
+            color: #999;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="success-container">
+        <div class="success-icon">&#10003;</div>
+        <h1>Bank Linked Successfully!</h1>
+        <p>Your bank account has been successfully linked.</p>
+        <p>Click the button below to return to checkout.</p>
+        <button type="button" class="confirm-btn" onclick="closeAndReturn()">
+            Close & Return to Checkout
+        </button>
+        <p class="note">This window will close and you will be redirected to checkout.</p>
+    </div>
+    <script>
+        var orgId = "' . htmlspecialchars($_monarch_org_id, ENT_QUOTES, 'UTF-8') . '";
+        var checkoutUrl = "' . htmlspecialchars($checkout_url, ENT_QUOTES, 'UTF-8') . '";
 
-            <button type="button" id="confirm-connection-btn" class="confirm-btn">
-                I've Connected My Bank Account
-            </button>
-
-            <div id="spinner" class="spinner"></div>
-            <div id="status-message" class="status-message"></div>
-            <div id="error-message" class="error-message"></div>
-
-            <p class="note">This will verify your bank connection and redirect you back to checkout.</p>
-        </div>
-
-        <script>
-            var orgId = '<?php echo monarch_esc_js($org_id); ?>';
-            var ajaxUrl = '<?php echo monarch_esc_js($ajax_url); ?>';
-            var nonce = '<?php echo monarch_esc_js($nonce); ?>';
-            var checkoutUrl = '<?php echo monarch_esc_js($checkout_url); ?>';
-            var maxRetries = 5;
-            var retryCount = 0;
-            var retryDelay = 3000;
-
-            // Notify parent window immediately that user landed on callback page
+        // Notify parent/opener window
+        function notifyParent() {
             try {
+                if (window.opener && !window.opener.closed) {
+                    window.opener.postMessage({
+                        type: "MONARCH_BANK_CALLBACK",
+                        status: "SUCCESS",
+                        org_id: orgId
+                    }, "*");
+                }
                 if (window.parent && window.parent !== window) {
                     window.parent.postMessage({
-                        type: 'MONARCH_BANK_CALLBACK',
-                        status: 'LANDED',
+                        type: "MONARCH_BANK_CALLBACK",
+                        status: "SUCCESS",
                         org_id: orgId
-                    }, '*');
+                    }, "*");
                 }
-            } catch (e) {
-                console.log('Could not notify parent window:', e);
+            } catch (e) {}
+        }
+
+        function closeAndReturn() {
+            notifyParent();
+            if (window.opener) {
+                window.close();
             }
+            setTimeout(function() {
+                window.location.href = checkoutUrl;
+            }, 300);
+        }
 
-            document.getElementById('confirm-connection-btn').addEventListener('click', function() {
-                var btn = this;
-                var spinner = document.getElementById('spinner');
-                var statusMsg = document.getElementById('status-message');
-                var errorMsg = document.getElementById('error-message');
+        // Auto-notify on load
+        notifyParent();
+    </script>
+</body>
+</html>';
+    exit;
+}
 
-                btn.disabled = true;
-                btn.textContent = 'Verifying...';
-                spinner.style.display = 'block';
-                statusMsg.style.display = 'none';
-                errorMsg.style.display = 'none';
-
-                getLatestPayToken();
-            });
-
-            function getLatestPayToken() {
-                var btn = document.getElementById('confirm-connection-btn');
-                var spinner = document.getElementById('spinner');
-                var statusMsg = document.getElementById('status-message');
-                var errorMsg = document.getElementById('error-message');
-
-                retryCount++;
-                statusMsg.textContent = 'Verifying bank connection... (Attempt ' + retryCount + ' of ' + maxRetries + ')';
-                statusMsg.style.display = 'block';
-
-                var xhr = new XMLHttpRequest();
-                xhr.open('POST', ajaxUrl, true);
-                xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
-
-                xhr.onload = function() {
-                    if (xhr.status === 200) {
-                        try {
-                            var response = JSON.parse(xhr.responseText);
-                            console.log('getLatestPayToken response:', response);
-
-                            if (response.success && response.data && response.data.paytoken_id) {
-                                statusMsg.textContent = 'Bank verified! Completing connection...';
-                                completeBankConnection(response.data.paytoken_id);
-                            } else {
-                                var errMsg = response.data || 'PayToken not found yet';
-                                console.log('PayToken not ready:', errMsg);
-
-                                if (retryCount < maxRetries) {
-                                    statusMsg.textContent = 'Verifying... Please wait (' + (maxRetries - retryCount) + ' attempts left)';
-                                    setTimeout(getLatestPayToken, retryDelay);
-                                } else {
-                                    showError('Could not verify bank connection after ' + maxRetries + ' attempts. Please click "Try Again" or return to checkout and use Manual Entry.');
-                                }
-                            }
-                        } catch (e) {
-                            console.error('Parse error:', e);
-                            if (retryCount < maxRetries) {
-                                setTimeout(getLatestPayToken, retryDelay);
-                            } else {
-                                showError('Unexpected server response. Please try again.');
-                            }
-                        }
-                    } else {
-                        if (retryCount < maxRetries) {
-                            statusMsg.textContent = 'Retrying...';
-                            setTimeout(getLatestPayToken, retryDelay);
-                        } else {
-                            showError('Server error. Please try again.');
-                        }
-                    }
-                };
-
-                xhr.onerror = function() {
-                    if (retryCount < maxRetries) {
-                        statusMsg.textContent = 'Connection issue, retrying...';
-                        setTimeout(getLatestPayToken, retryDelay);
-                    } else {
-                        showError('Network error. Please check your connection and try again.');
-                    }
-                };
-
-                xhr.send('action=monarch_get_latest_paytoken&nonce=' + nonce + '&org_id=' + orgId);
-            }
-
-            function completeBankConnection(paytokenId) {
-                var statusMsg = document.getElementById('status-message');
-
-                var xhr = new XMLHttpRequest();
-                xhr.open('POST', ajaxUrl, true);
-                xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
-
-                xhr.onload = function() {
-                    if (xhr.status === 200) {
-                        try {
-                            var response = JSON.parse(xhr.responseText);
-                            if (response.success) {
-                                statusMsg.textContent = 'Success! Redirecting to checkout...';
-
-                                // Notify parent window of success
-                                try {
-                                    if (window.parent && window.parent !== window) {
-                                        window.parent.postMessage({
-                                            type: 'MONARCH_BANK_CALLBACK',
-                                            status: 'SUCCESS',
-                                            org_id: orgId,
-                                            paytoken_id: paytokenId
-                                        }, '*');
-
-                                        // Try to refresh parent
-                                        try {
-                                            window.parent.location.reload();
-                                        } catch (e) {
-                                            window.location.href = checkoutUrl;
-                                        }
-                                    } else {
-                                        window.location.href = checkoutUrl;
-                                    }
-                                } catch (e) {
-                                    window.location.href = checkoutUrl;
-                                }
-                            } else {
-                                showError(response.data || 'Failed to complete bank connection.');
-                            }
-                        } catch (e) {
-                            showError('Unexpected response. Please return to checkout.');
-                        }
-                    } else {
-                        showError('Server error. Please return to checkout and try again.');
-                    }
-                };
-
-                xhr.onerror = function() {
-                    showError('Network error. Please return to checkout and try again.');
-                };
-
-                xhr.send('action=monarch_bank_connection_complete&nonce=' + nonce + '&paytoken_id=' + paytokenId);
-            }
-
-            function showError(message) {
-                var btn = document.getElementById('confirm-connection-btn');
-                var spinner = document.getElementById('spinner');
-                var statusMsg = document.getElementById('status-message');
-                var errorMsg = document.getElementById('error-message');
-
-                spinner.style.display = 'none';
-                statusMsg.style.display = 'none';
-                errorMsg.textContent = message;
-                errorMsg.style.display = 'block';
-                btn.disabled = false;
-                btn.textContent = 'Try Again';
-                retryCount = 0;
-            }
-        </script>
-    </body>
-    </html>
-    <?php
+// Standard WordPress security check
+if (!defined('ABSPATH')) {
     exit;
 }
 
