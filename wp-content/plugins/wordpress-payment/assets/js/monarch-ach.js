@@ -196,9 +196,9 @@ jQuery(document).ready(function($) {
         const currentUrl = window.location.href;
         let locationUrl = currentUrl.split('?')[0]; // Clean URL without query params
 
-        // Build callback URL - use a simple query param that's guaranteed to be detected
-        // The ?monarch_bank_callback=1 parameter will be caught by our PHP handler
-        let callbackUrl = locationUrl + '?monarch_bank_callback=1&org_id=' + orgId;
+        // Build callback URL - use admin-ajax.php which WordPress ALWAYS processes
+        // This prevents 404 errors because admin-ajax.php is a real WordPress file
+        let callbackUrl = monarch_ach_params.ajax_url + '?action=monarch_bank_callback&org_id=' + orgId;
 
         // Clean up URL formatting and replace placeholders properly
         if (url.includes('{redirectUrl}') || url.includes('{price}')) {
