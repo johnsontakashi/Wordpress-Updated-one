@@ -188,45 +188,6 @@ if ($monarch_mu_is_callback) {
             transform: translateY(-2px);
             box-shadow: 0 4px 12px rgba(40, 167, 69, 0.4);
         }
-        .confirm-btn:disabled {
-            background: #6c757d;
-            cursor: not-allowed;
-            transform: none;
-            box-shadow: none;
-        }
-        .spinner {
-            display: none;
-            width: 24px;
-            height: 24px;
-            border: 3px solid #e0e0e0;
-            border-top: 3px solid #28a745;
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-            margin: 20px auto 0;
-        }
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-        .error-message {
-            display: none;
-            color: #dc3545;
-            background: #fff3f3;
-            padding: 12px 16px;
-            border-radius: 8px;
-            margin-top: 20px;
-            font-size: 14px;
-            border: 1px solid #ffcdd2;
-        }
-        .status-message {
-            display: none;
-            color: #0066cc;
-            font-size: 14px;
-            margin-top: 15px;
-            padding: 10px;
-            background: #f0f7ff;
-            border-radius: 6px;
-        }
         .note {
             font-size: 12px;
             color: #999;
@@ -280,15 +241,11 @@ if ($monarch_mu_is_callback) {
             Open Verification Window
         </button>
 
-        <button type="button" id="confirm-connection-btn" class="confirm-btn">
-            I've Connected My Bank Account
+        <button type="button" id="close-window-btn" class="confirm-btn" onclick="window.close(); setTimeout(function(){ window.location.href=checkoutUrl; }, 300);">
+            Close Window
         </button>
 
-        <div id="spinner" class="spinner"></div>
-        <div id="status-message" class="status-message"></div>
-        <div id="error-message" class="error-message"></div>
-
-        <p class="note">This will verify your bank connection and redirect you back to checkout.</p>
+        <p class="note">Click to close this window and return to checkout.</p>
     </div>
 
     <script>
@@ -383,149 +340,6 @@ if ($monarch_mu_is_callback) {
             });
         }
 
-        document.getElementById('confirm-connection-btn').addEventListener('click', function() {
-            var btn = this;
-            var spinner = document.getElementById('spinner');
-            var statusMsg = document.getElementById('status-message');
-            var errorMsg = document.getElementById('error-message');
-
-            btn.disabled = true;
-            btn.textContent = 'Verifying...';
-            spinner.style.display = 'block';
-            statusMsg.style.display = 'none';
-            errorMsg.style.display = 'none';
-
-            getLatestPayToken();
-        });
-
-        function getLatestPayToken() {
-            var btn = document.getElementById('confirm-connection-btn');
-            var spinner = document.getElementById('spinner');
-            var statusMsg = document.getElementById('status-message');
-            var errorMsg = document.getElementById('error-message');
-
-            retryCount++;
-            statusMsg.textContent = 'Verifying bank connection... (Attempt ' + retryCount + ' of ' + maxRetries + ')';
-            statusMsg.style.display = 'block';
-
-            var xhr = new XMLHttpRequest();
-            xhr.open('POST', ajaxUrl, true);
-            xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
-
-            xhr.onload = function() {
-                if (xhr.status === 200) {
-                    try {
-                        var response = JSON.parse(xhr.responseText);
-                        console.log('getLatestPayToken response:', response);
-
-                        if (response.success && response.data && response.data.paytoken_id) {
-                            statusMsg.textContent = 'Bank verified! Completing connection...';
-                            completeBankConnection(response.data.paytoken_id);
-                        } else {
-                            var errMsg = response.data || 'PayToken not found yet';
-                            console.log('PayToken not ready:', errMsg);
-
-                            if (retryCount < maxRetries) {
-                                statusMsg.textContent = 'Verifying... Please wait (' + (maxRetries - retryCount) + ' attempts left)';
-                                setTimeout(getLatestPayToken, retryDelay);
-                            } else {
-                                showError('Could not verify bank connection after ' + maxRetries + ' attempts. Please click "Try Again" or return to checkout and use Manual Entry.');
-                            }
-                        }
-                    } catch (e) {
-                        console.error('Parse error:', e);
-                        if (retryCount < maxRetries) {
-                            setTimeout(getLatestPayToken, retryDelay);
-                        } else {
-                            showError('Unexpected server response. Please try again.');
-                        }
-                    }
-                } else {
-                    if (retryCount < maxRetries) {
-                        statusMsg.textContent = 'Retrying...';
-                        setTimeout(getLatestPayToken, retryDelay);
-                    } else {
-                        showError('Server error. Please try again.');
-                    }
-                }
-            };
-
-            xhr.onerror = function() {
-                if (retryCount < maxRetries) {
-                    statusMsg.textContent = 'Connection issue, retrying...';
-                    setTimeout(getLatestPayToken, retryDelay);
-                } else {
-                    showError('Network error. Please check your connection and try again.');
-                }
-            };
-
-            xhr.send('action=monarch_get_latest_paytoken&nonce=' + nonce + '&org_id=' + orgId);
-        }
-
-        function completeBankConnection(paytokenId) {
-            var statusMsg = document.getElementById('status-message');
-
-            var xhr = new XMLHttpRequest();
-            xhr.open('POST', ajaxUrl, true);
-            xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
-
-            xhr.onload = function() {
-                if (xhr.status === 200) {
-                    try {
-                        var response = JSON.parse(xhr.responseText);
-                        if (response.success) {
-                            statusMsg.textContent = 'Success! Closing this window...';
-
-                            // Notify the opener window of success
-                            notifyOpener('SUCCESS', paytokenId);
-
-                            // Try to reload the opener and close this popup
-                            try {
-                                if (window.opener && !window.opener.closed) {
-                                    window.opener.location.reload();
-                                    setTimeout(function() {
-                                        window.close();
-                                    }, 500);
-                                    return;
-                                }
-                            } catch (e) {
-                                console.log('Could not reload opener:', e);
-                            }
-
-                            // Fallback: redirect to checkout
-                            window.location.href = checkoutUrl;
-                        } else {
-                            showError(response.data || 'Failed to complete bank connection.');
-                        }
-                    } catch (e) {
-                        showError('Unexpected response. Please return to checkout.');
-                    }
-                } else {
-                    showError('Server error. Please return to checkout and try again.');
-                }
-            };
-
-            xhr.onerror = function() {
-                showError('Network error. Please return to checkout and try again.');
-            };
-
-            xhr.send('action=monarch_bank_connection_complete&nonce=' + nonce + '&paytoken_id=' + paytokenId);
-        }
-
-        function showError(message) {
-            var btn = document.getElementById('confirm-connection-btn');
-            var spinner = document.getElementById('spinner');
-            var statusMsg = document.getElementById('status-message');
-            var errorMsg = document.getElementById('error-message');
-
-            spinner.style.display = 'none';
-            statusMsg.style.display = 'none';
-            errorMsg.textContent = message;
-            errorMsg.style.display = 'block';
-            btn.disabled = false;
-            btn.textContent = 'Try Again';
-            retryCount = 0;
-        }
     </script>
 </body>
 </html>
