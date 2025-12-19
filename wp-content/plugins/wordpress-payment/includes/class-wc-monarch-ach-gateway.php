@@ -326,6 +326,42 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 $paytoken_id = get_user_meta($customer_id, '_monarch_paytoken_id', true);
                 $org_api_key = get_user_meta($customer_id, '_monarch_org_api_key', true);
                 $org_app_id = get_user_meta($customer_id, '_monarch_org_app_id', true);
+
+                // Check if the org was created with the same merchant_org_id and environment
+                // If settings changed, the old org won't work with new merchant credentials
+                $stored_merchant_org_id = get_user_meta($customer_id, '_monarch_merchant_org_id', true);
+                $stored_testmode = get_user_meta($customer_id, '_monarch_testmode', true);
+
+                if ($org_id && $stored_merchant_org_id && $stored_merchant_org_id !== $this->merchant_org_id) {
+                    // Merchant org changed - old org won't work
+                    $logger = WC_Monarch_Logger::instance();
+                    $logger->warning('Merchant org ID mismatch - clearing stored credentials', array(
+                        'stored_merchant_org_id' => $stored_merchant_org_id,
+                        'current_merchant_org_id' => $this->merchant_org_id,
+                        'customer_id' => $customer_id
+                    ));
+
+                    // Clear all stored Monarch data
+                    $this->clear_user_monarch_data($customer_id);
+                    $org_id = null;
+                    $paytoken_id = null;
+                }
+
+                // Check if environment (sandbox/prod) changed
+                $current_testmode = $this->testmode ? 'yes' : 'no';
+                if ($org_id && $stored_testmode && $stored_testmode !== $current_testmode) {
+                    // Environment changed - orgs don't transfer between sandbox and production
+                    $logger = WC_Monarch_Logger::instance();
+                    $logger->warning('Environment mismatch - clearing stored credentials', array(
+                        'stored_testmode' => $stored_testmode,
+                        'current_testmode' => $current_testmode,
+                        'customer_id' => $customer_id
+                    ));
+
+                    $this->clear_user_monarch_data($customer_id);
+                    $org_id = null;
+                    $paytoken_id = null;
+                }
             }
 
             // Bank account must be connected through Monarch's verification flow
@@ -333,24 +369,55 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 throw new Exception('Please connect your bank account before placing an order.');
             }
 
-            // CRITICAL: Ensure credential consistency to avoid "Paytoken is Invalid" errors
-            // The same credentials used to create the paytoken MUST be used for the transaction
-            
-            if ($org_api_key && $org_app_id) {
-                // Use purchaser org's credentials (preferred for transactions)
-                $api_key_for_sale = $org_api_key;
-                $app_id_for_sale = $org_app_id;
-                $order->add_order_note('Using purchaser org credentials for transaction (credential consistency)');
-            } else {
-                // No purchaser credentials available - this could cause "Paytoken is Invalid" error
-                // Let's verify the paytoken with merchant credentials first
-                $order->add_order_note('WARNING: No purchaser credentials found, using merchant credentials. May cause paytoken validation issues.');
-                $api_key_for_sale = $this->api_key;
-                $app_id_for_sale = $this->app_id;
-                
-                // Add additional logging for debugging
-                error_log("Monarch ACH: Using merchant credentials for transaction. OrgId: $org_id, PaytokenId: $paytoken_id");
+            // CRITICAL: Credential Strategy for Monarch ACH Transactions
+            //
+            // The Monarch API requires proper credential handling for transactions.
+            // Organizations (purchasers) are created under a merchant's parentOrgId.
+            //
+            // For transactions, we need to use MERCHANT credentials because:
+            // 1. The merchant is the parent organization that created the purchaser
+            // 2. The /transaction/sale endpoint requires merchant-level access
+            // 3. The merchantOrgId in the request body must match the credentials being used
+            //
+            // However, we must first verify the org_id is still valid before attempting transaction
+
+            $api_key_for_sale = $this->api_key;
+            $app_id_for_sale = $this->app_id;
+
+            // Verify organization exists by checking if we can retrieve the paytoken
+            // This is a pre-flight check to give better error messages
+            $org_validation = $this->verify_organization_exists($org_id, $api_key_for_sale, $app_id_for_sale);
+
+            if (!$org_validation['valid']) {
+                $logger = WC_Monarch_Logger::instance();
+                $logger->warning('Organization validation failed for repeat purchase', array(
+                    'org_id' => $org_id,
+                    'error' => $org_validation['error'],
+                    'customer_id' => $customer_id
+                ));
+
+                // The org is not valid - but don't immediately require reconnection
+                // This could be a temporary API issue, so provide a clearer message
+                if (strpos($org_validation['error'], '404') !== false ||
+                    strpos($org_validation['error'], 'not found') !== false) {
+                    // Organization truly doesn't exist - clear data and request reconnection
+                    if (!$is_guest && $customer_id) {
+                        delete_user_meta($customer_id, '_monarch_org_id');
+                        delete_user_meta($customer_id, '_monarch_user_id');
+                        delete_user_meta($customer_id, '_monarch_paytoken_id');
+                        delete_user_meta($customer_id, '_monarch_org_api_key');
+                        delete_user_meta($customer_id, '_monarch_org_app_id');
+                        delete_user_meta($customer_id, '_monarch_connected_date');
+                    }
+                    throw new Exception('Your bank connection has expired. Please reconnect your bank account to continue.');
+                }
+
+                // For other errors (network, temporary API issues), still attempt the transaction
+                // The transaction endpoint may have different validation than getlatestpaytoken
+                $order->add_order_note('Warning: Org pre-validation returned error, attempting transaction anyway: ' . $org_validation['error']);
             }
+
+            $order->add_order_note('Processing payment with merchant credentials for org: ' . $org_id);
 
             $monarch_api = new Monarch_API(
                 $api_key_for_sale,
@@ -361,12 +428,20 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             );
 
             $order->add_order_note('Using verified bank account - orgId: ' . $org_id . ', payTokenId: ' . $paytoken_id);
-            
-            // BEFORE creating transaction, verify paytoken exists with current credentials
-            $paytoken_validation = $this->validate_paytoken_with_credentials($org_id, $paytoken_id, $api_key_for_sale, $app_id_for_sale);
-            
-            if (!$paytoken_validation['valid']) {
-                throw new Exception('Paytoken validation failed: ' . $paytoken_validation['error'] . '. Please reconnect your bank account.');
+
+            // For repeat purchases, skip pre-validation and let the transaction itself validate
+            // The /getlatestpaytoken endpoint may not return the paytoken for various reasons,
+            // but the transaction can still succeed with the stored paytoken_id
+            // If the paytoken is truly invalid, the transaction will fail with a clear error
+            $skip_prevalidation = !empty($org_id) && !empty($paytoken_id);
+
+            if (!$skip_prevalidation) {
+                // Only validate if we're not sure about the credentials
+                $paytoken_validation = $this->validate_paytoken_with_credentials($org_id, $paytoken_id, $api_key_for_sale, $app_id_for_sale);
+
+                if (!$paytoken_validation['valid']) {
+                    throw new Exception('Paytoken validation failed: ' . $paytoken_validation['error'] . '. Please reconnect your bank account.');
+                }
             }
 
             // Create Sale Transaction
@@ -378,7 +453,58 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             ));
 
             if (!$transaction_result['success']) {
-                throw new Exception('Transaction failed: ' . $transaction_result['error']);
+                $error_message = $transaction_result['error'];
+                $status_code = $transaction_result['status_code'] ?? 0;
+
+                $logger = WC_Monarch_Logger::instance();
+                $logger->error('Transaction failed', array(
+                    'order_id' => $order_id,
+                    'error' => $error_message,
+                    'status_code' => $status_code,
+                    'org_id' => $org_id,
+                    'paytoken_id' => $paytoken_id,
+                    'merchant_org_id' => $this->merchant_org_id,
+                    'testmode' => $this->testmode ? 'yes' : 'no',
+                    'full_response' => $transaction_result['response'] ?? null
+                ));
+
+                // Check if this is specifically an "org not found" type error
+                // Be conservative - only clear data if the org definitively doesn't exist
+                $is_org_not_found = (
+                    stripos($error_message, 'org id is not valid') !== false ||
+                    stripos($error_message, 'orgid is not valid') !== false ||
+                    stripos($error_message, 'organization not found') !== false
+                );
+
+                $is_paytoken_invalid = (
+                    stripos($error_message, 'paytoken is invalid') !== false ||
+                    stripos($error_message, 'paytoken not found') !== false ||
+                    stripos($error_message, 'invalid paytoken') !== false
+                );
+
+                // Only clear and force reconnection if org truly doesn't exist (404-like errors)
+                // Don't clear on paytoken errors - user might just need to re-link their bank
+                // within the same org
+                if ($is_org_not_found && !$is_guest && $customer_id) {
+                    // Clear stale Monarch data so user can reconnect
+                    $this->clear_user_monarch_data($customer_id);
+
+                    $order->add_order_note('Monarch organization not found - credentials cleared for fresh reconnection');
+
+                    throw new Exception('Your payment account has expired. Please reconnect your bank account to continue.');
+                }
+
+                if ($is_paytoken_invalid && !$is_guest && $customer_id) {
+                    // Only clear paytoken - org might still be valid
+                    // User can reconnect bank to same org
+                    delete_user_meta($customer_id, '_monarch_paytoken_id');
+
+                    $order->add_order_note('Monarch paytoken invalid - cleared for bank reconnection');
+
+                    throw new Exception('Your bank connection needs to be refreshed. Please reconnect your bank account.');
+                }
+
+                throw new Exception('Transaction failed: ' . $error_message);
             }
 
             // Extract transaction ID - Monarch API may return it in various field names
@@ -936,6 +1062,11 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 update_user_meta($customer_id, '_monarch_paytoken_id', $paytoken_id);
                 update_user_meta($customer_id, '_monarch_connected_date', current_time('mysql'));
 
+                // IMPORTANT: Store the merchant_org_id and testmode used when creating this connection
+                // This allows us to detect if settings changed and the old org won't work
+                update_user_meta($customer_id, '_monarch_merchant_org_id', $this->merchant_org_id);
+                update_user_meta($customer_id, '_monarch_testmode', $this->testmode ? 'yes' : 'no');
+
                 // Copy temp API credentials to permanent
                 $temp_api_key = get_user_meta($customer_id, '_monarch_temp_org_api_key', true);
                 $temp_app_id = get_user_meta($customer_id, '_monarch_temp_org_app_id', true);
@@ -1202,16 +1333,8 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
 
         $customer_id = get_current_user_id();
 
-        // Delete all Monarch-related user meta
-        delete_user_meta($customer_id, '_monarch_org_id');
-        delete_user_meta($customer_id, '_monarch_user_id');
-        delete_user_meta($customer_id, '_monarch_paytoken_id');
-        delete_user_meta($customer_id, '_monarch_org_api_key');
-        delete_user_meta($customer_id, '_monarch_org_app_id');
-        delete_user_meta($customer_id, '_monarch_temp_org_id');
-        delete_user_meta($customer_id, '_monarch_temp_user_id');
-        delete_user_meta($customer_id, '_monarch_temp_org_api_key');
-        delete_user_meta($customer_id, '_monarch_temp_org_app_id');
+        // Delete all Monarch-related user meta using helper
+        $this->clear_user_monarch_data($customer_id);
 
         // Log the disconnection
         $logger = WC_Monarch_Logger::instance();
@@ -1367,6 +1490,10 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 update_user_meta($customer_id, '_monarch_paytoken_id', $paytoken_id);
                 update_user_meta($customer_id, '_monarch_connected_date', current_time('mysql'));
 
+                // IMPORTANT: Store the merchant_org_id and testmode used when creating this connection
+                update_user_meta($customer_id, '_monarch_merchant_org_id', $this->merchant_org_id);
+                update_user_meta($customer_id, '_monarch_testmode', $this->testmode ? 'yes' : 'no');
+
                 // Store the purchaser org's API credentials for transactions
                 $org_api = $org_result['data']['api'] ?? null;
                 if ($org_api) {
@@ -1394,6 +1521,97 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
 
         } catch (Exception $e) {
             wp_send_json_error('Manual bank entry failed: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * Clear all stored Monarch data for a user
+     * Used when credentials become invalid or environment changes
+     */
+    private function clear_user_monarch_data($customer_id) {
+        delete_user_meta($customer_id, '_monarch_org_id');
+        delete_user_meta($customer_id, '_monarch_user_id');
+        delete_user_meta($customer_id, '_monarch_paytoken_id');
+        delete_user_meta($customer_id, '_monarch_org_api_key');
+        delete_user_meta($customer_id, '_monarch_org_app_id');
+        delete_user_meta($customer_id, '_monarch_connected_date');
+        delete_user_meta($customer_id, '_monarch_merchant_org_id');
+        delete_user_meta($customer_id, '_monarch_testmode');
+        delete_user_meta($customer_id, '_monarch_temp_org_id');
+        delete_user_meta($customer_id, '_monarch_temp_user_id');
+        delete_user_meta($customer_id, '_monarch_temp_org_api_key');
+        delete_user_meta($customer_id, '_monarch_temp_org_app_id');
+    }
+
+    /**
+     * Verify that an organization exists and is accessible with the given credentials
+     * This is a pre-flight check before attempting transactions to provide better error messages
+     * Uses /getlatestpaytoken/{org_id} endpoint which validates both org existence and paytoken
+     */
+    private function verify_organization_exists($org_id, $api_key, $app_id) {
+        try {
+            $api_url = $this->testmode ? 'https://devapi.monarch.is/v1' : 'https://api.monarch.is/v1';
+
+            $response = wp_remote_get($api_url . '/getlatestpaytoken/' . $org_id, array(
+                'headers' => array(
+                    'accept' => 'application/json',
+                    'X-API-KEY' => $api_key,
+                    'X-APP-ID' => $app_id
+                ),
+                'timeout' => 15 // Shorter timeout for pre-flight check
+            ));
+
+            if (is_wp_error($response)) {
+                // Network error - don't fail, let the transaction attempt proceed
+                return array(
+                    'valid' => true, // Assume valid on network error
+                    'error' => 'Network check skipped: ' . $response->get_error_message()
+                );
+            }
+
+            $status_code = wp_remote_retrieve_response_code($response);
+            $body = json_decode(wp_remote_retrieve_body($response), true);
+
+            // 2xx status codes indicate the org exists
+            if ($status_code >= 200 && $status_code < 300) {
+                return array(
+                    'valid' => true,
+                    'error' => null,
+                    'paytoken_id' => $body['_id'] ?? $body['payToken'] ?? null
+                );
+            }
+
+            // 404 means org not found - this is a definitive "org doesn't exist"
+            if ($status_code == 404) {
+                return array(
+                    'valid' => false,
+                    'error' => '404 not found - organization does not exist'
+                );
+            }
+
+            // 401/403 might mean credential mismatch - still attempt transaction
+            if ($status_code == 401 || $status_code == 403) {
+                return array(
+                    'valid' => true, // Let transaction attempt proceed
+                    'error' => 'Auth issue on pre-check (status ' . $status_code . '), will attempt transaction'
+                );
+            }
+
+            // Other errors - extract message
+            $error_msg = $body['error']['message'] ?? $body['message'] ?? 'Unknown error (status ' . $status_code . ')';
+
+            // For most errors, let the transaction attempt proceed
+            return array(
+                'valid' => true,
+                'error' => 'Pre-check warning: ' . $error_msg
+            );
+
+        } catch (Exception $e) {
+            // On exception, don't block - let transaction attempt proceed
+            return array(
+                'valid' => true,
+                'error' => 'Pre-check exception: ' . $e->getMessage()
+            );
         }
     }
 
