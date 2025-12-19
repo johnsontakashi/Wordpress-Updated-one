@@ -564,11 +564,28 @@ jQuery(document).ready(function($) {
                 return;
             }
 
-            // Handle our own callback page message (from redirect)
-            if (messageData.type === 'MONARCH_BANK_CALLBACK' && messageData.status === 'SUCCESS') {
-                console.log('Monarch bank callback received - bank linking complete');
-                triggerBankVerification();
-                return;
+            // Handle our own callback page messages (from redirect)
+            if (messageData.type === 'MONARCH_BANK_CALLBACK') {
+                console.log('Monarch bank callback received:', messageData);
+
+                if (messageData.status === 'SUCCESS') {
+                    // Bank linking complete with paytoken - finalize connection
+                    if (messageData.paytoken_id) {
+                        console.log('Bank linked with paytoken:', messageData.paytoken_id);
+                        completeBankConnection(messageData.paytoken_id);
+                    } else {
+                        // Success without paytoken - trigger verification
+                        triggerBankVerification();
+                    }
+                    return;
+                }
+
+                if (messageData.status === 'LANDED') {
+                    // User landed on callback page - update UI to show progress
+                    console.log('User landed on callback page, waiting for them to click confirm');
+                    $('#monarch-bank-connected-btn').text('Waiting for confirmation...');
+                    return;
+                }
             }
 
             // Generic success indicators
