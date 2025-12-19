@@ -40,12 +40,6 @@ class WC_Monarch_ACH_Gateway_Plugin {
 
         // Ensure rewrite rules are flushed if needed (on admin)
         add_action('admin_init', array($this, 'maybe_flush_rewrite_rules'));
-        
-        // Add 404 error debugging for payment issues
-        add_action('wp', array($this, 'debug_404_errors'), 5);
-        
-        // Hook into template redirect to catch 404s early
-        add_action('template_redirect', array($this, 'handle_payment_404s'), 1);
     }
 
     /**
@@ -280,69 +274,17 @@ class WC_Monarch_ACH_Gateway_Plugin {
      * Register callback endpoint rewrite rule
      */
     public function register_callback_endpoint() {
-        // More specific rewrite rule to prevent conflicts
-        add_rewrite_rule('^monarch-bank-callback/?$', 'index.php?monarch_bank_ok=1', 'top');
-        add_rewrite_rule('^monarch-callback/?$', 'index.php?monarch_bank_ok=1', 'top');
-        add_rewrite_tag('%monarch_bank_ok%', '([^&]+)');
-        
-        // Also register a query var for better handling
-        add_filter('query_vars', array($this, 'add_query_vars'));
-    }
-    
-    /**
-     * Add custom query vars
-     */
-    public function add_query_vars($vars) {
-        $vars[] = 'monarch_bank_ok';
-        $vars[] = 'monarch_callback';
-        $vars[] = 'org_id';
-        return $vars;
+        add_rewrite_rule('^monarch-bank-callback/?', 'index.php?monarch_bank_ok=1', 'top');
+        add_rewrite_tag('%monarch_bank_ok%', '1');
     }
 
     /**
      * Handle the callback endpoint request
      */
     public function handle_callback_endpoint($wp) {
-        // Check for various callback indicators with better error handling
-        $is_callback_request = false;
-        $request_uri = $_SERVER['REQUEST_URI'] ?? '';
-        
-        // Method 1: WordPress query vars
-        if (isset($wp->query_vars['monarch_bank_ok']) && $wp->query_vars['monarch_bank_ok'] === '1') {
-            $is_callback_request = true;
-        } 
-        // Method 2: Direct GET parameters
-        elseif (isset($_GET['monarch_bank_ok']) && $_GET['monarch_bank_ok'] === '1') {
-            $is_callback_request = true;
-        } 
-        // Method 3: Legacy callback parameter
-        elseif (isset($_GET['monarch_callback'])) {
-            $is_callback_request = true;
-        }
-        // Method 4: URL path contains callback endpoint
-        elseif (strpos($request_uri, 'monarch-bank-callback') !== false) {
-            $is_callback_request = true;
-        }
-        // Method 5: URL path contains monarch callback
-        elseif (strpos($request_uri, 'monarch-callback') !== false) {
-            $is_callback_request = true;
-        }
-        
-        if ($is_callback_request) {
-            // Prevent any caching
-            if (!headers_sent()) {
-                nocache_headers();
-                header('Cache-Control: no-cache, no-store, must-revalidate');
-                header('Pragma: no-cache');
-                header('Expires: 0');
-            }
-            
-            $org_id = isset($_GET['org_id']) ? sanitize_text_field($_GET['org_id']) : '';
-            
-            // Log the successful callback for debugging
-            error_log("Monarch ACH: Bank callback received successfully - URI: $request_uri, OrgID: $org_id");
-            
-            $this->output_ok_page($org_id);
+        if (isset($wp->query_vars['monarch_bank_ok']) ||
+            (isset($_GET['monarch_bank_ok']) && $_GET['monarch_bank_ok'] === '1')) {
+            $this->output_ok_page();
         }
     }
 
@@ -631,76 +573,6 @@ class WC_Monarch_ACH_Gateway_Plugin {
         // Register rewrite rules and flush them
         $this->register_callback_endpoint();
         flush_rewrite_rules();
-    }
-
-    /**
-     * Debug 404 errors that might be related to payment processing
-     */
-    public function debug_404_errors() {
-        global $wp_query;
-        
-        // Only check on checkout or payment related pages
-        if (!is_checkout() && !is_wc_endpoint_url('order-pay')) {
-            return;
-        }
-        
-        // Log potential 404 issues for debugging
-        if (is_404() || $wp_query->is_404()) {
-            $request_uri = $_SERVER['REQUEST_URI'] ?? '';
-            $query_string = $_SERVER['QUERY_STRING'] ?? '';
-            
-            error_log("Monarch ACH: Potential payment 404 detected on checkout");
-            error_log("Request URI: " . $request_uri);
-            error_log("Query String: " . $query_string);
-            error_log("POST data: " . print_r($_POST, true));
-        }
-    }
-    
-    /**
-     * Handle payment-related 404 errors
-     */
-    public function handle_payment_404s() {
-        global $wp_query;
-        $request_uri = $_SERVER['REQUEST_URI'] ?? '';
-        
-        // First, check if this is a bank callback that's hitting 404
-        if (is_404() && (strpos($request_uri, 'monarch-bank-callback') !== false || 
-                         strpos($request_uri, 'monarch_bank_callback') !== false ||
-                         isset($_GET['monarch_bank_ok']) ||
-                         isset($_GET['monarch_bank_callback']))) {
-            
-            // This is a bank callback that's hitting 404 - handle it directly
-            error_log("Monarch ACH: Bank callback hitting 404, handling directly - URI: $request_uri");
-            
-            if (!headers_sent()) {
-                nocache_headers();
-                header('Cache-Control: no-cache, no-store, must-revalidate');
-                header('Pragma: no-cache');
-                header('Expires: 0');
-            }
-            
-            $org_id = isset($_GET['org_id']) ? sanitize_text_field($_GET['org_id']) : '';
-            $this->output_ok_page($org_id);
-            return;
-        }
-        
-        // Check if this is a 404 on checkout/payment pages
-        if (!is_404() || !is_checkout()) {
-            return;
-        }
-        
-        // If this looks like a payment callback, try to handle it
-        if (strpos($request_uri, 'checkout') !== false || 
-            strpos($request_uri, 'order-pay') !== false ||
-            isset($_POST['payment_method']) && $_POST['payment_method'] === 'monarch_ach') {
-            
-            // Log the issue for debugging
-            error_log("Monarch ACH: Handling payment 404 - redirecting to checkout");
-            
-            // Redirect to checkout to prevent 404
-            wp_safe_redirect(wc_get_checkout_url());
-            exit;
-        }
     }
 
     /**

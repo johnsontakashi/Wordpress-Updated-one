@@ -165,7 +165,6 @@ jQuery(document).ready(function($) {
             method: 'POST',
             data: customerData,
             dataType: 'json',
-            timeout: 30000, // 30 second timeout
             success: function(response) {
                 if (response.success && response.data.bank_linking_url) {
                     // Store organization data
@@ -180,32 +179,7 @@ jQuery(document).ready(function($) {
                 }
             },
             error: function(jqXHR, textStatus, errorThrown) {
-                console.error('AJAX Error Details:', {
-                    status: jqXHR.status,
-                    statusText: jqXHR.statusText,
-                    textStatus: textStatus,
-                    errorThrown: errorThrown,
-                    responseText: jqXHR.responseText,
-                    url: monarch_ach_params.ajax_url
-                });
-                
-                let errorMsg = 'Connection error occurred.';
-                
-                if (jqXHR.status === 404) {
-                    errorMsg = 'AJAX endpoint not found (404 error). Please check your WordPress configuration.';
-                } else if (jqXHR.status === 403) {
-                    errorMsg = 'Access denied (403 error). Please refresh the page and try again.';
-                } else if (jqXHR.status === 500) {
-                    errorMsg = 'Server error (500). Please try again later.';
-                } else if (textStatus === 'timeout') {
-                    errorMsg = 'Request timed out. Please check your internet connection and try again.';
-                } else if (textStatus === 'parsererror') {
-                    errorMsg = 'Error processing server response. Please try again.';
-                } else if (errorThrown) {
-                    errorMsg = 'Connection error: ' + errorThrown;
-                }
-                
-                showError(errorMsg);
+                showError('Connection error: ' + errorThrown);
                 $button.prop('disabled', false).text('Connect Bank Account');
                 $spinner.hide();
             }
@@ -218,36 +192,22 @@ jQuery(document).ready(function($) {
 
         console.log('Original bank linking URL from Monarch:', connectionUrl);
 
-        // Build callback URL using site_url to ensure it's always accessible
-        // Use the dedicated callback endpoint we registered in PHP
-        let callbackUrl = monarch_ach_params.site_url + '/monarch-bank-callback/?monarch_bank_ok=1&org_id=' + orgId;
-        
-        // Fallback to current page URL if site_url is not available
-        if (!monarch_ach_params.site_url) {
-            const currentUrl = window.location.href;
-            let locationUrl = currentUrl.split('?')[0]; // Clean URL without query params
-            callbackUrl = locationUrl + '?monarch_bank_callback=1&org_id=' + orgId;
-        }
-        
-        // Ensure callback URL uses the same protocol (HTTP/HTTPS) as current page
-        if (window.location.protocol === 'https:' && callbackUrl.startsWith('http:')) {
-            callbackUrl = callbackUrl.replace('http:', 'https:');
-        }
+        // Get the current page URL for callbacks
+        const currentUrl = window.location.href;
+        let locationUrl = currentUrl.split('?')[0]; // Clean URL without query params
+
+        // Build callback URL - use a simple query param that's guaranteed to be detected
+        // The ?monarch_bank_callback=1 parameter will be caught by our PHP handler
+        let callbackUrl = locationUrl + '?monarch_bank_callback=1&org_id=' + orgId;
 
         // Clean up URL formatting and replace placeholders properly
         if (url.includes('{redirectUrl}') || url.includes('{price}')) {
-            console.log('Bank linking URL contains placeholders. Original URL:', url);
-            console.log('Callback URL being used:', callbackUrl);
-            
             // Replace placeholders with actual values
             url = url.replace(/\{price\}/g, '100'); // Default price or get from order
             // Use the callback URL with parameters for better redirect detection
             url = url.replace(/\{redirectUrl\}/g, encodeURIComponent(callbackUrl));
 
-            console.log('Final URL after placeholder replacement:', url);
-            console.log('Decoded callback URL:', decodeURIComponent(callbackUrl));
-        } else {
-            console.log('Bank linking URL does not contain placeholders:', url);
+            console.log('Replaced URL placeholders - redirectUrl:', callbackUrl, 'price: 100');
         }
 
         // Add locationURL parameter for Yodlee FastLink postMessage support

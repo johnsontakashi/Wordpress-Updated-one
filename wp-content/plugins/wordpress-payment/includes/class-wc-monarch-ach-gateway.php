@@ -183,26 +183,10 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             WC_MONARCH_ACH_VERSION
         );
         
-        // Enhanced AJAX URL configuration to prevent 404 errors
-        $ajax_url = admin_url('admin-ajax.php');
-        
-        // Fallback AJAX URL handling for edge cases
-        if (!$ajax_url || strpos($ajax_url, 'admin-ajax.php') === false) {
-            $ajax_url = site_url('/wp-admin/admin-ajax.php');
-        }
-        
-        // Ensure HTTPS if site is using HTTPS
-        if (is_ssl()) {
-            $ajax_url = str_replace('http://', 'https://', $ajax_url);
-        }
-        
         wp_localize_script('wc-monarch-ach', 'monarch_ach_params', array(
-            'ajax_url' => $ajax_url,
+            'ajax_url' => admin_url('admin-ajax.php'),
             'nonce' => wp_create_nonce('monarch_ach_nonce'),
-            'test_mode' => $this->testmode ? 'yes' : 'no',
-            'debug' => WP_DEBUG,
-            'site_url' => site_url(),
-            'admin_url' => admin_url()
+            'test_mode' => $this->testmode ? 'yes' : 'no'
         ));
     }
     
