@@ -369,55 +369,22 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 throw new Exception('Please connect your bank account before placing an order.');
             }
 
-            // CRITICAL: Credential Strategy for Monarch ACH Transactions
-            //
-            // The Monarch API requires proper credential handling for transactions.
-            // Organizations (purchasers) are created under a merchant's parentOrgId.
-            //
-            // For transactions, we need to use MERCHANT credentials because:
-            // 1. The merchant is the parent organization that created the purchaser
-            // 2. The /transaction/sale endpoint requires merchant-level access
-            // 3. The merchantOrgId in the request body must match the credentials being used
-            //
-            // However, we must first verify the org_id is still valid before attempting transaction
+            // Credential Strategy: Try purchaser credentials first, fall back to merchant credentials
+            // The purchaser's API credentials were returned when the organization was created
+            $use_purchaser_credentials = false;
 
-            $api_key_for_sale = $this->api_key;
-            $app_id_for_sale = $this->app_id;
-
-            // Verify organization exists by checking if we can retrieve the paytoken
-            // This is a pre-flight check to give better error messages
-            $org_validation = $this->verify_organization_exists($org_id, $api_key_for_sale, $app_id_for_sale);
-
-            if (!$org_validation['valid']) {
-                $logger = WC_Monarch_Logger::instance();
-                $logger->warning('Organization validation failed for repeat purchase', array(
-                    'org_id' => $org_id,
-                    'error' => $org_validation['error'],
-                    'customer_id' => $customer_id
-                ));
-
-                // The org is not valid - but don't immediately require reconnection
-                // This could be a temporary API issue, so provide a clearer message
-                if (strpos($org_validation['error'], '404') !== false ||
-                    strpos($org_validation['error'], 'not found') !== false) {
-                    // Organization truly doesn't exist - clear data and request reconnection
-                    if (!$is_guest && $customer_id) {
-                        delete_user_meta($customer_id, '_monarch_org_id');
-                        delete_user_meta($customer_id, '_monarch_user_id');
-                        delete_user_meta($customer_id, '_monarch_paytoken_id');
-                        delete_user_meta($customer_id, '_monarch_org_api_key');
-                        delete_user_meta($customer_id, '_monarch_org_app_id');
-                        delete_user_meta($customer_id, '_monarch_connected_date');
-                    }
-                    throw new Exception('Your bank connection has expired. Please reconnect your bank account to continue.');
-                }
-
-                // For other errors (network, temporary API issues), still attempt the transaction
-                // The transaction endpoint may have different validation than getlatestpaytoken
-                $order->add_order_note('Warning: Org pre-validation returned error, attempting transaction anyway: ' . $org_validation['error']);
+            if (!$is_guest && !empty($org_api_key) && !empty($org_app_id)) {
+                // Use purchaser's own credentials for the transaction
+                $api_key_for_sale = $org_api_key;
+                $app_id_for_sale = $org_app_id;
+                $use_purchaser_credentials = true;
+                $order->add_order_note('Processing payment with purchaser credentials for org: ' . $org_id);
+            } else {
+                // Fall back to merchant credentials
+                $api_key_for_sale = $this->api_key;
+                $app_id_for_sale = $this->app_id;
+                $order->add_order_note('Processing payment with merchant credentials for org: ' . $org_id);
             }
-
-            $order->add_order_note('Processing payment with merchant credentials for org: ' . $org_id);
 
             $monarch_api = new Monarch_API(
                 $api_key_for_sale,
@@ -427,22 +394,7 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 $this->testmode
             );
 
-            $order->add_order_note('Using verified bank account - orgId: ' . $org_id . ', payTokenId: ' . $paytoken_id);
-
-            // For repeat purchases, skip pre-validation and let the transaction itself validate
-            // The /getlatestpaytoken endpoint may not return the paytoken for various reasons,
-            // but the transaction can still succeed with the stored paytoken_id
-            // If the paytoken is truly invalid, the transaction will fail with a clear error
-            $skip_prevalidation = !empty($org_id) && !empty($paytoken_id);
-
-            if (!$skip_prevalidation) {
-                // Only validate if we're not sure about the credentials
-                $paytoken_validation = $this->validate_paytoken_with_credentials($org_id, $paytoken_id, $api_key_for_sale, $app_id_for_sale);
-
-                if (!$paytoken_validation['valid']) {
-                    throw new Exception('Paytoken validation failed: ' . $paytoken_validation['error'] . '. Please reconnect your bank account.');
-                }
-            }
+            $order->add_order_note('Using bank account - orgId: ' . $org_id . ', payTokenId: ' . $paytoken_id . ', credentials: ' . ($use_purchaser_credentials ? 'purchaser' : 'merchant'));
 
             // Create Sale Transaction
             $transaction_result = $monarch_api->create_sale_transaction(array(
@@ -468,43 +420,18 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                     'full_response' => $transaction_result['response'] ?? null
                 ));
 
-                // Check if this is specifically an "org not found" type error
-                // Be conservative - only clear data if the org definitively doesn't exist
-                $is_org_not_found = (
-                    stripos($error_message, 'org id is not valid') !== false ||
-                    stripos($error_message, 'orgid is not valid') !== false ||
-                    stripos($error_message, 'organization not found') !== false
-                );
+                // Log the error for debugging - don't auto-clear user data
+                // Show the actual error to the user so they can understand what went wrong
+                $logger->debug('Transaction error details', array(
+                    'error_message' => $error_message,
+                    'status_code' => $status_code,
+                    'org_id' => $org_id,
+                    'paytoken_id' => $paytoken_id
+                ));
 
-                $is_paytoken_invalid = (
-                    stripos($error_message, 'paytoken is invalid') !== false ||
-                    stripos($error_message, 'paytoken not found') !== false ||
-                    stripos($error_message, 'invalid paytoken') !== false
-                );
-
-                // Only clear and force reconnection if org truly doesn't exist (404-like errors)
-                // Don't clear on paytoken errors - user might just need to re-link their bank
-                // within the same org
-                if ($is_org_not_found && !$is_guest && $customer_id) {
-                    // Clear stale Monarch data so user can reconnect
-                    $this->clear_user_monarch_data($customer_id);
-
-                    $order->add_order_note('Monarch organization not found - credentials cleared for fresh reconnection');
-
-                    throw new Exception('Your payment account has expired. Please reconnect your bank account to continue.');
-                }
-
-                if ($is_paytoken_invalid && !$is_guest && $customer_id) {
-                    // Only clear paytoken - org might still be valid
-                    // User can reconnect bank to same org
-                    delete_user_meta($customer_id, '_monarch_paytoken_id');
-
-                    $order->add_order_note('Monarch paytoken invalid - cleared for bank reconnection');
-
-                    throw new Exception('Your bank connection needs to be refreshed. Please reconnect your bank account.');
-                }
-
-                throw new Exception('Transaction failed: ' . $error_message);
+                // Simply throw the error - don't try to auto-detect and clear data
+                // This prevents false positives and lets the user see the actual problem
+                throw new Exception($error_message);
             }
 
             // Extract transaction ID - Monarch API may return it in various field names

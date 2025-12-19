@@ -243,7 +243,7 @@
 
 /* Iframe modal specific styles */
 .monarch-modal-iframe-content {
-    max-width: 600px;
+    max-width: 520px;
     height: 85vh;
     max-height: 85vh;
 }
@@ -260,7 +260,6 @@
     flex: 1;
     min-height: 0;
     display: flex;
-    justify-content: center;
     background: transparent;
     overflow: hidden;
 }

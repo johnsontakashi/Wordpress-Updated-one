@@ -103,20 +103,30 @@ class Monarch_API {
      */
     public function create_sale_transaction($transaction_data) {
         $url = $this->base_url . '/transaction/sale';
-        
+
+        // Log the transaction attempt for debugging
+        $logger = WC_Monarch_Logger::instance();
+        $logger->debug('Creating sale transaction', array(
+            'amount' => floatval($transaction_data['amount']),
+            'org_id' => $transaction_data['org_id'],
+            'paytoken_id' => $transaction_data['paytoken_id'],
+            'merchant_org_id' => $this->merchant_org_id,
+            'partner_name' => $this->partner_name,
+            'api_key_last_4' => substr($this->api_key, -4),
+            'app_id' => $this->app_id,
+            'base_url' => $this->base_url
+        ));
+
         $data = array(
             'amount' => floatval($transaction_data['amount']),
             'orgId' => $transaction_data['org_id'],
             'comment' => $transaction_data['comment'],
             'service_origin' => 'partner_app',
             'partnerName' => $this->partner_name,
-            'account_type' => 'C',
             'payTokenId' => $transaction_data['paytoken_id'],
-            'subscription_plan_id' => '',
-            'taxRemittance' => '',
             'merchantOrgId' => $this->merchant_org_id
         );
-        
+
         return $this->make_request('POST', $url, $data);
     }
     
@@ -205,8 +215,49 @@ class Monarch_API {
                 'data' => $decoded_body
             );
         } else {
-            // Provide user-friendly error messages for common HTTP errors
-            $error = $decoded_body['error']['message'] ?? $decoded_body['message'] ?? null;
+            // Log raw response body for debugging API errors
+            $logger->debug('API Error Raw Response', array(
+                'status_code' => $status_code,
+                'raw_body' => $body,
+                'decoded_body' => $decoded_body,
+                'url' => $url
+            ));
+
+            // Extract error message from various possible response formats
+            $error = null;
+
+            // Try common error formats
+            if (isset($decoded_body['error'])) {
+                if (is_string($decoded_body['error'])) {
+                    $error = $decoded_body['error'];
+                } elseif (isset($decoded_body['error']['message'])) {
+                    $error = $decoded_body['error']['message'];
+                } elseif (isset($decoded_body['error']['msg'])) {
+                    $error = $decoded_body['error']['msg'];
+                }
+            }
+
+            if (!$error && isset($decoded_body['message'])) {
+                $error = $decoded_body['message'];
+            }
+
+            if (!$error && isset($decoded_body['msg'])) {
+                $error = $decoded_body['msg'];
+            }
+
+            if (!$error && isset($decoded_body['errorMessage'])) {
+                $error = $decoded_body['errorMessage'];
+            }
+
+            // If still no error, try to get any string from the response
+            if (!$error && is_array($decoded_body)) {
+                foreach ($decoded_body as $key => $value) {
+                    if (is_string($value) && strlen($value) > 5 && strlen($value) < 500) {
+                        $error = "$key: $value";
+                        break;
+                    }
+                }
+            }
 
             if (!$error) {
                 switch ($status_code) {

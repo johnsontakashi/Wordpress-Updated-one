@@ -277,8 +277,8 @@ jQuery(document).ready(function($) {
         // Add CSS for iframe modal
         if (!$('#monarch-iframe-style').length) {
             $('head').append('<style id="monarch-iframe-style">' +
-                '.monarch-modal-iframe-content { width: 90%; max-width: 600px; height: 85vh; max-height: 85vh; }' +
-                '.monarch-iframe-container { flex: 1; min-height: 0; display: flex; justify-content: center; background: transparent; overflow: hidden; }' +
+                '.monarch-modal-iframe-content { width: 95%; max-width: 920px; height: 85vh; max-height: 85vh; }' +
+                '.monarch-iframe-container { flex: 1; min-height: 0; display: flex; background: transparent; overflow: hidden; }' +
                 '#monarch-bank-iframe { width: 100%; height: 100%; border: none; background: transparent; }' +
                 '#modal-auto-section { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }' +
                 '</style>');
@@ -1031,4 +1031,17 @@ jQuery(document).ready(function($) {
     if (typeof monarch_ach_params !== 'undefined' && monarch_ach_params.test_mode === 'yes') {
         // Test mode is active - could add debug helpers here
     }
+
+    // Listen for WooCommerce checkout errors and auto-refresh if bank connection expired
+    $(document.body).on('checkout_error', function() {
+        // Check if the error message contains "bank connection has expired"
+        var errorText = $('.woocommerce-error').text();
+        if (errorText.indexOf('bank connection has expired') !== -1 ||
+            errorText.indexOf('Please reconnect your bank') !== -1) {
+            // Show a message and reload after 2 seconds
+            setTimeout(function() {
+                location.reload();
+            }, 2000);
+        }
+    });
 });
