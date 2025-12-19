@@ -1,6 +1,9 @@
 <?php
 /**
- * Monarch Bank Callback Handler (Must-Use Plugin)
+ * Plugin Name: Monarch Bank Callback Handler
+ * Description: Handles bank linking callbacks from Monarch/Yodlee for ACH payments.
+ * Version: 1.0.0
+ * Author: Monarch ACH Gateway
  *
  * This mu-plugin runs BEFORE any regular plugins and handles bank linking
  * callbacks from Monarch/Yodlee to prevent WordPress from returning a 404 error.
