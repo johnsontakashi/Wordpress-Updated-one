@@ -472,8 +472,8 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             $order->update_meta_data('_monarch_api_response', json_encode($data));
             $order->save();
 
-            // Save transaction data
-            $this->save_transaction_data($order_id, $data, $org_id, $paytoken_id);
+            // Save transaction data - include order total since API response may not have it
+            $this->save_transaction_data($order_id, $data, $org_id, $paytoken_id, $order->get_total());
 
             $order->payment_complete($transaction_id);
             $order->add_order_note('ACH payment processed. Transaction ID: ' . ($transaction_id ?: 'N/A'));
@@ -566,7 +566,7 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
         );
     }
     
-    private function save_transaction_data($order_id, $transaction_data, $org_id, $paytoken_id) {
+    private function save_transaction_data($order_id, $transaction_data, $org_id, $paytoken_id, $order_total = 0) {
         global $wpdb;
 
         $table_name = $wpdb->prefix . 'monarch_ach_transactions';
@@ -582,6 +582,9 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             ?? $transaction_data['reference_id']
             ?? 'txn_' . uniqid();
 
+        // Use order total if provided, otherwise try to get from API response
+        $amount = floatval($order_total) > 0 ? floatval($order_total) : floatval($transaction_data['amount'] ?? 0);
+
         $wpdb->insert(
             $table_name,
             array(
@@ -589,7 +592,7 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 'transaction_id' => $transaction_id,
                 'monarch_org_id' => $org_id,
                 'paytoken_id' => $paytoken_id,
-                'amount' => $transaction_data['amount'] ?? 0,
+                'amount' => $amount,
                 'currency' => 'USD',
                 'status' => $transaction_data['status'] ?? 'pending',
                 'api_response' => json_encode($transaction_data)
