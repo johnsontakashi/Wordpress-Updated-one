@@ -11,43 +11,36 @@
  * WC tested up to: 8.0
  */
 
+// Standard WordPress security check
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+// Check if WooCommerce is active
+if (!in_array('woocommerce/woocommerce.php', apply_filters('active_plugins', get_option('active_plugins')))) {
+    return;
+}
+
+define('WC_MONARCH_ACH_VERSION', '1.0.2');
+define('WC_MONARCH_ACH_PLUGIN_PATH', plugin_dir_path(__FILE__));
+define('WC_MONARCH_ACH_PLUGIN_URL', plugin_dir_url(__FILE__));
+
 /**
- * BANK CALLBACK HANDLER - Runs immediately when plugin loads
- * This intercepts the bank linking callback URL before WordPress processes it
+ * Handle bank callback via WordPress template_redirect hook
+ * This is more reliable than the early check as it works after WordPress is fully loaded
  */
-
-// Check for bank callback parameter
-$_monarch_is_callback = false;
-$_monarch_org_id = '';
-
-if (isset($_GET['monarch_bank_callback']) && $_GET['monarch_bank_callback'] === '1') {
-    $_monarch_is_callback = true;
-    $_monarch_org_id = isset($_GET['org_id']) ? preg_replace('/[^a-zA-Z0-9_\-]/', '', $_GET['org_id']) : '';
-}
-
-if (!$_monarch_is_callback && isset($_SERVER['REQUEST_URI']) && strpos($_SERVER['REQUEST_URI'], 'monarch_bank_callback=1') !== false) {
-    $_monarch_is_callback = true;
-    if (preg_match('/org_id=([^&]+)/', $_SERVER['REQUEST_URI'], $_matches)) {
-        $_monarch_org_id = preg_replace('/[^a-zA-Z0-9_\-]/', '', urldecode($_matches[1]));
+add_action('template_redirect', 'monarch_handle_bank_callback_redirect', 1);
+function monarch_handle_bank_callback_redirect() {
+    if (!isset($_GET['monarch_bank_callback']) || $_GET['monarch_bank_callback'] !== '1') {
+        return;
     }
-}
 
-// If this is a callback, show success page and exit
-if ($_monarch_is_callback) {
-    // Build checkout URL
-    $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https://' : 'http://';
-    $host = isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : 'localhost';
-    $checkout_url = $protocol . $host . '/checkout/';
-
-    // Send headers
-    if (!headers_sent()) {
-        header('HTTP/1.1 200 OK');
-        header('Content-Type: text/html; charset=UTF-8');
-        header('Cache-Control: no-cache, no-store, must-revalidate');
-    }
+    $org_id = isset($_GET['org_id']) ? sanitize_text_field($_GET['org_id']) : '';
+    $checkout_url = function_exists('wc_get_checkout_url') ? wc_get_checkout_url() : home_url('/checkout/');
 
     // Output success page
-    echo '<!DOCTYPE html>
+    ?>
+<!DOCTYPE html>
 <html>
 <head>
     <title>Bank Linked Successfully</title>
@@ -86,18 +79,8 @@ if ($_monarch_is_callback) {
             font-size: 40px;
             color: white;
         }
-        h1 {
-            color: #1a1a1a;
-            font-size: 26px;
-            margin: 0 0 15px 0;
-            font-weight: 600;
-        }
-        p {
-            color: #666;
-            font-size: 15px;
-            margin: 0 0 10px 0;
-            line-height: 1.5;
-        }
+        h1 { color: #1a1a1a; font-size: 26px; margin: 0 0 15px 0; font-weight: 600; }
+        p { color: #666; font-size: 15px; margin: 0 0 10px 0; line-height: 1.5; }
         .confirm-btn {
             display: inline-block;
             background: #28a745;
@@ -110,7 +93,6 @@ if ($_monarch_is_callback) {
             cursor: pointer;
             margin-top: 20px;
             transition: all 0.2s ease;
-            text-decoration: none;
             width: 100%;
             max-width: 320px;
         }
@@ -119,11 +101,7 @@ if ($_monarch_is_callback) {
             transform: translateY(-2px);
             box-shadow: 0 4px 12px rgba(40, 167, 69, 0.4);
         }
-        .note {
-            font-size: 12px;
-            color: #999;
-            margin-top: 20px;
-        }
+        .note { font-size: 12px; color: #999; margin-top: 20px; }
     </style>
 </head>
 <body>
@@ -132,66 +110,37 @@ if ($_monarch_is_callback) {
         <h1>Bank Linked Successfully!</h1>
         <p>Your bank account has been successfully linked.</p>
         <p>Click the button below to return to checkout.</p>
-        <button type="button" class="confirm-btn" onclick="closeAndReturn()">
-            Close & Return to Checkout
-        </button>
+        <button type="button" class="confirm-btn" onclick="closeAndReturn()">Close & Return to Checkout</button>
         <p class="note">This window will close and you will be redirected to checkout.</p>
     </div>
     <script>
-        var orgId = "' . htmlspecialchars($_monarch_org_id, ENT_QUOTES, 'UTF-8') . '";
-        var checkoutUrl = "' . htmlspecialchars($checkout_url, ENT_QUOTES, 'UTF-8') . '";
+        var orgId = "<?php echo esc_js($org_id); ?>";
+        var checkoutUrl = "<?php echo esc_js($checkout_url); ?>";
 
-        // Notify parent/opener window
         function notifyParent() {
             try {
                 if (window.opener && !window.opener.closed) {
-                    window.opener.postMessage({
-                        type: "MONARCH_BANK_CALLBACK",
-                        status: "SUCCESS",
-                        org_id: orgId
-                    }, "*");
+                    window.opener.postMessage({ type: "MONARCH_BANK_CALLBACK", status: "SUCCESS", org_id: orgId }, "*");
                 }
                 if (window.parent && window.parent !== window) {
-                    window.parent.postMessage({
-                        type: "MONARCH_BANK_CALLBACK",
-                        status: "SUCCESS",
-                        org_id: orgId
-                    }, "*");
+                    window.parent.postMessage({ type: "MONARCH_BANK_CALLBACK", status: "SUCCESS", org_id: orgId }, "*");
                 }
             } catch (e) {}
         }
 
         function closeAndReturn() {
             notifyParent();
-            if (window.opener) {
-                window.close();
-            }
-            setTimeout(function() {
-                window.location.href = checkoutUrl;
-            }, 300);
+            if (window.opener) { window.close(); }
+            setTimeout(function() { window.location.href = checkoutUrl; }, 300);
         }
 
-        // Auto-notify on load
         notifyParent();
     </script>
 </body>
-</html>';
+</html>
+    <?php
     exit;
 }
-
-// Standard WordPress security check
-if (!defined('ABSPATH')) {
-    exit;
-}
-
-// Check if WooCommerce is active
-if (!in_array('woocommerce/woocommerce.php', apply_filters('active_plugins', get_option('active_plugins')))) {
-    return;
-}
-
-define('WC_MONARCH_ACH_VERSION', '1.0.1');
-define('WC_MONARCH_ACH_PLUGIN_PATH', plugin_dir_path(__FILE__));
-define('WC_MONARCH_ACH_PLUGIN_URL', plugin_dir_url(__FILE__));
 
 class WC_Monarch_ACH_Gateway_Plugin {
 
