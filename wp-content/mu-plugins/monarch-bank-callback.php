@@ -298,7 +298,7 @@ if ($monarch_mu_is_callback) {
             document.getElementById('iframe-notice').style.display = 'block';
             document.getElementById('iframe-notice').innerHTML = '<strong>Opening verification window...</strong><br>Please wait while we open a new window.';
             document.getElementById('open-window-btn').style.display = 'inline-block';
-            document.getElementById('confirm-connection-btn').style.display = 'none';
+            document.getElementById('close-window-btn').style.display = 'none';
             document.getElementById('main-instruction').textContent = 'A new window is opening...';
 
             // AUTOMATICALLY open new window after a short delay
