@@ -277,9 +277,10 @@ jQuery(document).ready(function($) {
         // Add CSS for iframe modal
         if (!$('#monarch-iframe-style').length) {
             $('head').append('<style id="monarch-iframe-style">' +
-                '.monarch-modal-iframe-content { width: 90%; max-width: 800px; height: 85vh; }' +
-                '.monarch-iframe-container { height: calc(100% - 180px); min-height: 400px; }' +
-                '#monarch-bank-iframe { width: 100%; height: 100%; border: none; background: #fff; }' +
+                '.monarch-modal-iframe-content { width: 90%; max-width: 600px; height: 85vh; max-height: 85vh; }' +
+                '.monarch-iframe-container { flex: 1; min-height: 0; display: flex; justify-content: center; background: transparent; overflow: hidden; }' +
+                '#monarch-bank-iframe { width: 100%; height: 100%; border: none; background: transparent; }' +
+                '#modal-auto-section { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }' +
                 '</style>');
         }
 

@@ -227,18 +227,49 @@
 
 .monarch-modal-content {
     position: absolute;
-    top: 2%;
+    top: 50%;
     left: 50%;
-    transform: translateX(-50%);
+    transform: translate(-50%, -50%);
     background: white;
     width: 95%;
     max-width: 500px;
-    height: 96vh;
+    max-height: 90vh;
     border-radius: 12px;
     display: flex;
     flex-direction: column;
     box-shadow: 0 20px 60px rgba(0,0,0,0.3);
     overflow: hidden;
+}
+
+/* Iframe modal specific styles */
+.monarch-modal-iframe-content {
+    max-width: 600px;
+    height: 85vh;
+    max-height: 85vh;
+}
+
+.monarch-modal-iframe-content #modal-auto-section {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.monarch-modal-iframe-content .monarch-iframe-container {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    justify-content: center;
+    background: transparent;
+    overflow: hidden;
+}
+
+.monarch-modal-iframe-content #monarch-bank-iframe {
+    width: 100%;
+    height: 100%;
+    border: none;
+    background: transparent;
 }
 
 .monarch-modal-header {
@@ -473,8 +504,10 @@
 
     .monarch-modal-content {
         width: 98%;
-        height: 98vh;
-        top: 1%;
+        max-height: 98vh;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
         border-radius: 8px;
     }
 
