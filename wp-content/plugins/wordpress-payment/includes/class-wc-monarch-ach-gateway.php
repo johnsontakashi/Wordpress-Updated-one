@@ -50,6 +50,8 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
         add_action('wp_ajax_monarch_disconnect_bank', array($this, 'ajax_disconnect_bank'));
         add_action('wp_ajax_monarch_manual_bank_entry', array($this, 'ajax_manual_bank_entry'));
         add_action('wp_ajax_nopriv_monarch_manual_bank_entry', array($this, 'ajax_manual_bank_entry'));
+        add_action('wp_ajax_monarch_get_bank_linking_url', array($this, 'ajax_get_bank_linking_url'));
+        add_action('wp_ajax_nopriv_monarch_get_bank_linking_url', array($this, 'ajax_get_bank_linking_url'));
     }
     
     public function init_form_fields() {
@@ -230,15 +232,35 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
         $paytoken_id = get_user_meta($customer_id, '_monarch_paytoken_id', true);
         
         if ($monarch_org_id && $paytoken_id) {
+            // User has both org_id and valid paytoken - ready to pay
             echo '<div class="monarch-bank-connected">';
-            echo '<p><strong> Bank account connected</strong></p>';
+            echo '<p><strong>Bank account connected</strong></p>';
             echo '<p><a href="#" id="monarch-disconnect-bank" class="monarch-disconnect-link">Use a different bank account</a></p>';
             echo '<input type="hidden" name="monarch_org_id" value="' . esc_attr($monarch_org_id) . '">';
             echo '<input type="hidden" name="monarch_paytoken_id" value="' . esc_attr($paytoken_id) . '">';
             echo '</div>';
             return;
         }
-        
+
+        if ($monarch_org_id && !$paytoken_id) {
+            // Returning user: has org_id but paytoken expired after last transaction
+            // They need to get a new paytoken by selecting their bank again
+            ?>
+            <div class="monarch-returning-user">
+                <p><strong>Welcome back!</strong></p>
+                <p>Please click "Continue with Bank" to authorize this payment.</p>
+                <input type="hidden" id="monarch_org_id" name="monarch_org_id" value="<?php echo esc_attr($monarch_org_id); ?>">
+                <input type="hidden" id="monarch_paytoken_id" name="monarch_paytoken_id" value="">
+                <p class="form-row form-row-wide">
+                    <button type="button" id="monarch-reconnect-bank" class="button alt">Continue with Bank</button>
+                    <span id="monarch-reconnect-spinner" class="spinner" style="display:none; float:none; margin-left:10px;"></span>
+                </p>
+                <p><a href="#" id="monarch-use-different-bank" class="monarch-disconnect-link">Use a different bank account</a></p>
+            </div>
+            <?php
+            return;
+        }
+
         ?>
         <div id="monarch-ach-form">
             <div id="monarch-ach-errors" class="woocommerce-error" style="display:none;"></div>
@@ -477,6 +499,21 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
 
             $order->payment_complete($transaction_id);
             $order->add_order_note('ACH payment processed. Transaction ID: ' . ($transaction_id ?: 'N/A'));
+
+            // IMPORTANT: Clear the paytoken after successful transaction
+            // Per Monarch: "once the latest pay token is used for a transaction, it expires and cannot be reused"
+            // The org_id remains valid - user can get a new paytoken by selecting their bank again
+            if (!$is_guest && $customer_id) {
+                delete_user_meta($customer_id, '_monarch_paytoken_id');
+                $logger->debug('Cleared expired paytoken after successful transaction', array(
+                    'customer_id' => $customer_id,
+                    'order_id' => $order_id,
+                    'used_paytoken' => $paytoken_id
+                ));
+            } elseif ($is_guest) {
+                // For guest users, clear from session
+                WC()->session->__unset('monarch_paytoken_id');
+            }
 
             return array(
                 'result' => 'success',
@@ -1271,6 +1308,154 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
         $logger->log_customer_event('bank_disconnected', $customer_id, array());
 
         wp_send_json_success(array('message' => 'Bank account disconnected successfully'));
+    }
+
+    /**
+     * AJAX handler for getting bank linking URL for returning users
+     * Used when a user has an org_id but their paytoken has expired after a transaction
+     * Per Monarch: "They can simply select the bank and proceed by clicking Continue"
+     */
+    public function ajax_get_bank_linking_url() {
+        check_ajax_referer('monarch_ach_nonce', 'nonce');
+
+        $org_id = sanitize_text_field($_POST['org_id']);
+
+        if (empty($org_id)) {
+            wp_send_json_error('Organization ID is required');
+            return;
+        }
+
+        $logger = WC_Monarch_Logger::instance();
+
+        try {
+            // Get the user's stored API credentials
+            $customer_id = get_current_user_id();
+            $purchaser_api_key = get_user_meta($customer_id, '_monarch_org_api_key', true);
+            $purchaser_app_id = get_user_meta($customer_id, '_monarch_org_app_id', true);
+
+            // Use purchaser credentials if available, otherwise merchant credentials
+            $api_key_to_use = $purchaser_api_key ?: $this->api_key;
+            $app_id_to_use = $purchaser_app_id ?: $this->app_id;
+
+            $logger->debug('Getting bank linking URL for returning user', array(
+                'org_id' => $org_id,
+                'customer_id' => $customer_id,
+                'using_purchaser_credentials' => !empty($purchaser_api_key)
+            ));
+
+            // First, check if user already has a valid paytoken
+            $api_url = $this->testmode
+                ? 'https://devapi.monarch.is/v1'
+                : 'https://api.monarch.is/v1';
+
+            $response = wp_remote_get($api_url . '/getlatestpaytoken/' . $org_id, array(
+                'headers' => array(
+                    'accept' => 'application/json',
+                    'X-API-KEY' => $api_key_to_use,
+                    'X-APP-ID' => $app_id_to_use
+                ),
+                'timeout' => 30
+            ));
+
+            if (!is_wp_error($response)) {
+                $status_code = wp_remote_retrieve_response_code($response);
+                $body = json_decode(wp_remote_retrieve_body($response), true);
+
+                if ($status_code >= 200 && $status_code < 300) {
+                    $paytoken_id = $body['_id'] ?? $body['payToken'] ?? $body['id'] ?? null;
+
+                    if ($paytoken_id) {
+                        // User already has a valid paytoken - save it and return
+                        update_user_meta($customer_id, '_monarch_paytoken_id', $paytoken_id);
+
+                        $logger->debug('Returning user already has valid paytoken', array(
+                            'paytoken_id' => $paytoken_id
+                        ));
+
+                        wp_send_json_success(array(
+                            'paytoken_id' => $paytoken_id,
+                            'org_id' => $org_id,
+                            'message' => 'Bank account already connected'
+                        ));
+                        return;
+                    }
+                }
+            }
+
+            // No valid paytoken - need to get bank linking URL
+            // For returning users, we need to get the partner_embedded_url for their org
+            $response = wp_remote_get($api_url . '/organization/' . $org_id, array(
+                'headers' => array(
+                    'accept' => 'application/json',
+                    'X-API-KEY' => $api_key_to_use,
+                    'X-APP-ID' => $app_id_to_use
+                ),
+                'timeout' => 30
+            ));
+
+            if (is_wp_error($response)) {
+                wp_send_json_error('Failed to get organization details: ' . $response->get_error_message());
+                return;
+            }
+
+            $status_code = wp_remote_retrieve_response_code($response);
+            $body = json_decode(wp_remote_retrieve_body($response), true);
+
+            if ($status_code < 200 || $status_code >= 300) {
+                $error_msg = $body['error']['message'] ?? $body['message'] ?? 'API error';
+                wp_send_json_error('Failed to get organization: ' . $error_msg);
+                return;
+            }
+
+            // Get bank linking URL from organization response
+            $bank_linking_url = $body['partner_embedded_url'] ?? $body['bankLinkingUrl'] ?? $body['connectionUrl'] ?? '';
+
+            if (empty($bank_linking_url)) {
+                // If no URL in org response, try to construct it or use an alternative method
+                $logger->warning('No bank linking URL in organization response', array(
+                    'response_keys' => array_keys($body)
+                ));
+
+                // Try to get URL from partner embedded endpoint
+                $embed_response = wp_remote_get($api_url . '/partner/embedded/' . $org_id, array(
+                    'headers' => array(
+                        'accept' => 'application/json',
+                        'X-API-KEY' => $api_key_to_use,
+                        'X-APP-ID' => $app_id_to_use
+                    ),
+                    'timeout' => 30
+                ));
+
+                if (!is_wp_error($embed_response)) {
+                    $embed_body = json_decode(wp_remote_retrieve_body($embed_response), true);
+                    $bank_linking_url = $embed_body['url'] ?? $embed_body['partner_embedded_url'] ?? '';
+                }
+            }
+
+            if (empty($bank_linking_url)) {
+                wp_send_json_error('Could not retrieve bank linking URL. Please try using the "Use a different bank account" option.');
+                return;
+            }
+
+            // Clean up URL (same logic as create_organization)
+            $bank_linking_url = urldecode($bank_linking_url);
+            if (strpos($bank_linking_url, 'http%3A') !== false) {
+                $bank_linking_url = urldecode($bank_linking_url);
+            }
+
+            $logger->debug('Bank linking URL retrieved for returning user', array(
+                'org_id' => $org_id,
+                'url_length' => strlen($bank_linking_url)
+            ));
+
+            wp_send_json_success(array(
+                'bank_linking_url' => $bank_linking_url,
+                'org_id' => $org_id
+            ));
+
+        } catch (Exception $e) {
+            wp_send_json_error('Error getting bank linking URL: ' . $e->getMessage());
+        }
     }
 
     /**

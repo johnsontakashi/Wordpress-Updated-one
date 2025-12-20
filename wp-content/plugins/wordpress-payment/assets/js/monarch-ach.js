@@ -985,6 +985,91 @@ jQuery(document).ready(function($) {
         $errorDiv.html(message).show();
     }
 
+    // Handle returning user "Continue with Bank" button
+    // This is for users who have org_id but their paytoken expired after a transaction
+    $(document).on('click', '#monarch-reconnect-bank', function(e) {
+        e.preventDefault();
+
+        const $button = $(this);
+        const $spinner = $('#monarch-reconnect-spinner');
+        const orgId = $('#monarch_org_id').val();
+
+        if (!orgId) {
+            showError('Organization ID not found. Please refresh the page.');
+            return;
+        }
+
+        // Disable button and show spinner
+        $button.prop('disabled', true).text('Connecting...');
+        $spinner.show();
+
+        // For returning users, we need to get a new paytoken
+        // Call getLatestPayToken to get the bank linking URL or paytoken
+        $.ajax({
+            url: monarch_ach_params.ajax_url,
+            method: 'POST',
+            data: {
+                action: 'monarch_get_bank_linking_url',
+                nonce: monarch_ach_params.nonce,
+                org_id: orgId
+            },
+            dataType: 'json',
+            success: function(response) {
+                if (response.success && response.data.bank_linking_url) {
+                    // Open bank linking modal
+                    openBankConnectionWindow(response.data.bank_linking_url, orgId);
+                } else if (response.success && response.data.paytoken_id) {
+                    // User already has a valid paytoken (rare case)
+                    $('#monarch_paytoken_id').val(response.data.paytoken_id);
+                    location.reload();
+                } else {
+                    showError(response.data || 'Failed to get bank linking URL. Please try again.');
+                    $button.prop('disabled', false).text('Continue with Bank');
+                    $spinner.hide();
+                }
+            },
+            error: function(jqXHR, textStatus, errorThrown) {
+                showError('Connection error: ' + errorThrown);
+                $button.prop('disabled', false).text('Continue with Bank');
+                $spinner.hide();
+            }
+        });
+    });
+
+    // Handle "Use a different bank account" for returning users
+    $(document).on('click', '#monarch-use-different-bank', function(e) {
+        e.preventDefault();
+
+        if (!confirm('This will disconnect your current bank account. You will need to go through the full setup again. Continue?')) {
+            return;
+        }
+
+        const $link = $(this);
+        $link.text('Disconnecting...').css('pointer-events', 'none');
+
+        $.ajax({
+            url: monarch_ach_params.ajax_url,
+            method: 'POST',
+            data: {
+                action: 'monarch_disconnect_bank',
+                nonce: monarch_ach_params.nonce
+            },
+            dataType: 'json',
+            success: function(response) {
+                if (response.success) {
+                    location.reload();
+                } else {
+                    showError(response.data || 'Failed to disconnect bank account');
+                    $link.text('Use a different bank account').css('pointer-events', 'auto');
+                }
+            },
+            error: function(jqXHR, textStatus, errorThrown) {
+                showError('Connection error: ' + errorThrown);
+                $link.text('Use a different bank account').css('pointer-events', 'auto');
+            }
+        });
+    });
+
     // Handle disconnect bank account click
     $(document).on('click', '#monarch-disconnect-bank', function(e) {
         e.preventDefault();
