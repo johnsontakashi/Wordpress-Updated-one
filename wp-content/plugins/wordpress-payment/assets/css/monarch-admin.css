@@ -326,24 +326,53 @@
 }
 
 .monarch-modal-close-btn {
-    background: none;
-    border: none;
-    font-size: 28px;
+    background: #f0f0f1;
+    border: 1px solid #c3c4c7;
+    font-size: 20px;
+    font-weight: 400;
     cursor: pointer;
-    color: #666;
+    color: #50575e;
     padding: 0;
-    width: 36px;
-    height: 36px;
-    display: flex;
+    width: 32px;
+    height: 32px;
+    display: inline-flex;
     align-items: center;
     justify-content: center;
     border-radius: 4px;
     transition: all 0.2s ease;
+    line-height: 1;
+    text-decoration: none;
+    box-shadow: none;
 }
 
 .monarch-modal-close-btn:hover {
-    background: #e0e0e0;
-    color: #333;
+    background: #dcdcde;
+    border-color: #8c8f94;
+    color: #1d2327;
+}
+
+.monarch-modal-close-btn:focus {
+    outline: 2px solid #2271b1;
+    outline-offset: 1px;
+}
+
+/* Footer close button - different style */
+.monarch-modal-footer .monarch-modal-close-btn {
+    background: #f6f7f7;
+    border: 1px solid #c3c4c7;
+    color: #2271b1;
+    font-size: 13px;
+    font-weight: 400;
+    width: auto;
+    height: auto;
+    padding: 6px 12px;
+    border-radius: 3px;
+}
+
+.monarch-modal-footer .monarch-modal-close-btn:hover {
+    background: #f0f0f1;
+    border-color: #8c8f94;
+    color: #0a4b78;
 }
 
 .monarch-modal-body {
