@@ -1,6 +1,9 @@
 jQuery(document).ready(function($) {
     'use strict';
-    
+
+    console.log('Monarch Admin JS loaded - Version 2.0');
+    console.log('monarch_admin_params:', typeof monarch_admin_params !== 'undefined' ? monarch_admin_params : 'NOT DEFINED');
+
     // Test API connection
     $('#test-api-connection').on('click', function() {
         const $button = $(this);
@@ -43,11 +46,21 @@ jQuery(document).ready(function($) {
     
     // View transaction details
     $(document).on('click', '.view-details', function() {
+        console.log('View Details button clicked');
         const transactionId = $(this).data('transaction');
         const $button = $(this);
 
+        console.log('Transaction ID:', transactionId);
+
+        if (typeof monarch_admin_params === 'undefined') {
+            alert('Error: Admin params not loaded. Please refresh the page.');
+            return;
+        }
+
         // Disable button while loading
         $button.prop('disabled', true).text('Loading...');
+
+        console.log('Making AJAX request to:', monarch_admin_params.ajax_url);
 
         $.ajax({
             url: monarch_admin_params.ajax_url,
@@ -58,14 +71,17 @@ jQuery(document).ready(function($) {
                 transaction_id: transactionId
             },
             success: function(response) {
+                console.log('AJAX Response:', response);
                 if (response.success) {
                     showTransactionModal(response.data);
                 } else {
                     alert('Error: ' + (response.data || 'Failed to load transaction details'));
                 }
             },
-            error: function() {
-                alert('Error: Failed to load transaction details');
+            error: function(xhr, status, error) {
+                console.error('AJAX Error:', status, error);
+                console.error('Response:', xhr.responseText);
+                alert('Error: Failed to load transaction details. Check console for details.');
             },
             complete: function() {
                 $button.prop('disabled', false).text('View Details');
