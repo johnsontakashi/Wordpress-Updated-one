@@ -11,6 +11,7 @@ class WC_Monarch_Admin {
         add_action('admin_init', array($this, 'admin_init'));
         add_action('admin_enqueue_scripts', array($this, 'enqueue_admin_scripts'));
         add_action('wp_ajax_monarch_test_connection', array($this, 'test_api_connection'));
+        add_action('wp_ajax_monarch_get_transaction_details', array($this, 'ajax_get_transaction_details'));
         add_action('admin_notices', array($this, 'admin_notices'));
 
         // Add meta box to order page
@@ -1051,7 +1052,104 @@ class WC_Monarch_Admin {
             wp_send_json_error('API connection failed: ' . $e->getMessage());
         }
     }
-    
+
+    /**
+     * AJAX handler for getting transaction details
+     */
+    public function ajax_get_transaction_details() {
+        check_ajax_referer('monarch_admin_nonce', 'nonce');
+
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+
+        $transaction_id = intval($_POST['transaction_id']);
+
+        if (!$transaction_id) {
+            wp_send_json_error('Transaction ID is required');
+        }
+
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'monarch_ach_transactions';
+
+        // Get transaction from database
+        $transaction = $wpdb->get_row($wpdb->prepare(
+            "SELECT * FROM $table_name WHERE id = %d LIMIT 1",
+            $transaction_id
+        ));
+
+        if (!$transaction) {
+            wp_send_json_error('Transaction not found');
+        }
+
+        // Get the order
+        $order = wc_get_order($transaction->order_id);
+
+        if (!$order) {
+            wp_send_json_error('Order not found');
+        }
+
+        // Build billing address
+        $billing_parts = array_filter(array(
+            $order->get_billing_address_1(),
+            $order->get_billing_address_2(),
+            $order->get_billing_city() . ', ' . $order->get_billing_state() . ' ' . $order->get_billing_postcode(),
+            WC()->countries->countries[$order->get_billing_country()] ?? $order->get_billing_country()
+        ));
+        $billing_address = implode('<br>', array_map('esc_html', $billing_parts));
+
+        // Get order items
+        $order_items = array();
+        foreach ($order->get_items() as $item) {
+            $order_items[] = array(
+                'name' => $item->get_name(),
+                'quantity' => $item->get_quantity(),
+                'total' => wc_price($item->get_total())
+            );
+        }
+
+        // Status label mapping
+        $status_labels = array(
+            'pending' => 'Pending',
+            'processing' => 'Processing',
+            'submitted' => 'Submitted',
+            'completed' => 'Completed',
+            'success' => 'Success',
+            'settled' => 'Settled',
+            'approved' => 'Approved',
+            'failed' => 'Failed',
+            'declined' => 'Declined',
+            'rejected' => 'Rejected',
+            'returned' => 'Returned',
+            'refunded' => 'Refunded',
+            'voided' => 'Voided',
+            'cancelled' => 'Cancelled'
+        );
+
+        // Build response data
+        $data = array(
+            'transaction_id' => $transaction->transaction_id,
+            'order_id' => $transaction->order_id,
+            'amount' => wc_price($transaction->amount),
+            'currency' => $transaction->currency ?: 'USD',
+            'status' => $transaction->status,
+            'status_label' => $status_labels[strtolower($transaction->status)] ?? ucfirst($transaction->status),
+            'created_at' => date('M j, Y g:i A', strtotime($transaction->created_at)),
+            'monarch_org_id' => $transaction->monarch_org_id ?: 'N/A',
+            'paytoken_id' => $transaction->paytoken_id ?: 'N/A',
+            'order_status' => wc_get_order_status_name($order->get_status()),
+            'order_total' => wc_price($order->get_total()),
+            'order_edit_url' => $order->get_edit_order_url(),
+            'customer_name' => $order->get_billing_first_name() . ' ' . $order->get_billing_last_name(),
+            'customer_email' => $order->get_billing_email(),
+            'customer_phone' => $order->get_billing_phone(),
+            'billing_address' => $billing_address,
+            'order_items' => $order_items
+        );
+
+        wp_send_json_success($data);
+    }
+
     public function admin_notices() {
         if (!current_user_can('manage_woocommerce')) {
             return;
