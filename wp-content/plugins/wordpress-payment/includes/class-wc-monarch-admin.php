@@ -321,11 +321,14 @@ class WC_Monarch_Admin {
     
     public function enqueue_admin_scripts($hook) {
         // Check if we're on a Monarch admin page or WooCommerce settings
-        // Hook format: woocommerce_page_monarch-ach-transactions
+        // Hook format varies: woocommerce_page_monarch-ach-transactions, toplevel_page_monarch-ach-transactions, etc.
+        $page = isset($_GET['page']) ? $_GET['page'] : '';
+
         $is_monarch_page = (
             strpos($hook, 'monarch') !== false ||
             strpos($hook, 'wc-settings') !== false ||
-            (isset($_GET['page']) && strpos($_GET['page'], 'monarch') !== false)
+            $page === 'monarch-ach-transactions' ||
+            strpos($page, 'monarch') !== false
         );
 
         if (!$is_monarch_page) {
@@ -353,7 +356,9 @@ class WC_Monarch_Admin {
         wp_localize_script('monarch-ach-admin', 'monarch_admin_params', array(
             'ajax_url' => admin_url('admin-ajax.php'),
             'nonce' => wp_create_nonce('monarch_admin_nonce'),
-            'debug' => true
+            'debug' => true,
+            'hook' => $hook,
+            'page' => $page
         ));
     }
     
@@ -505,9 +510,171 @@ class WC_Monarch_Admin {
                 ?>
             <?php endif; ?>
         </div>
+
+        <!-- Inline script for View Details functionality -->
+        <script type="text/javascript">
+        jQuery(document).ready(function($) {
+            console.log('=== Monarch Transactions Inline JS Loaded ===');
+
+            // View transaction details
+            $(document).on('click', '.view-details', function(e) {
+                e.preventDefault();
+                console.log('View Details button clicked');
+
+                var transactionId = $(this).data('transaction');
+                var $button = $(this);
+
+                console.log('Transaction ID:', transactionId);
+
+                // Disable button while loading
+                $button.prop('disabled', true).text('Loading...');
+
+                $.ajax({
+                    url: '<?php echo admin_url('admin-ajax.php'); ?>',
+                    type: 'POST',
+                    data: {
+                        action: 'monarch_get_transaction_details',
+                        nonce: '<?php echo wp_create_nonce('monarch_admin_nonce'); ?>',
+                        transaction_id: transactionId
+                    },
+                    success: function(response) {
+                        console.log('AJAX Response:', response);
+                        if (response.success) {
+                            showTransactionModal(response.data);
+                        } else {
+                            alert('Error: ' + (response.data || 'Failed to load transaction details'));
+                        }
+                    },
+                    error: function(xhr, status, error) {
+                        console.error('AJAX Error:', status, error);
+                        alert('Error: Failed to load transaction details. Check console for details.');
+                    },
+                    complete: function() {
+                        $button.prop('disabled', false).text('View Details');
+                    }
+                });
+            });
+
+            // Show transaction details in a modal
+            function showTransactionModal(data) {
+                // Remove any existing modal
+                $('#monarch-transaction-modal').remove();
+
+                // Build order items HTML
+                var orderItemsHtml = '';
+                if (data.order_items && data.order_items.length > 0) {
+                    orderItemsHtml = '<table class="widefat" style="margin-top: 10px;">' +
+                        '<thead><tr><th>Product</th><th>Qty</th><th>Total</th></tr></thead><tbody>';
+                    data.order_items.forEach(function(item) {
+                        orderItemsHtml += '<tr>' +
+                            '<td>' + escapeHtml(item.name) + '</td>' +
+                            '<td>' + item.quantity + '</td>' +
+                            '<td>' + item.total + '</td>' +
+                            '</tr>';
+                    });
+                    orderItemsHtml += '</tbody></table>';
+                }
+
+                // Build modal HTML
+                var modalHtml = '<div id="monarch-transaction-modal" class="monarch-modal-overlay">' +
+                    '<div class="monarch-modal-box">' +
+                    '<div class="monarch-modal-header">' +
+                    '<h2>Transaction Details</h2>' +
+                    '<button type="button" class="monarch-modal-close-btn">&times;</button>' +
+                    '</div>' +
+                    '<div class="monarch-modal-body">' +
+
+                    // Transaction Info
+                    '<div class="monarch-detail-section">' +
+                    '<h3>Transaction Information</h3>' +
+                    '<table class="form-table">' +
+                    '<tr><th>Transaction ID:</th><td><code>' + escapeHtml(data.transaction_id) + '</code></td></tr>' +
+                    '<tr><th>Amount:</th><td><strong>' + data.amount + '</strong></td></tr>' +
+                    '<tr><th>Status:</th><td><span class="status-badge status-' + escapeHtml(data.status) + '">' + escapeHtml(data.status_label) + '</span></td></tr>' +
+                    '<tr><th>Date:</th><td>' + escapeHtml(data.created_at) + '</td></tr>' +
+                    '<tr><th>Currency:</th><td>' + escapeHtml(data.currency) + '</td></tr>' +
+                    '</table>' +
+                    '</div>' +
+
+                    // Order Info
+                    '<div class="monarch-detail-section">' +
+                    '<h3>Order Information</h3>' +
+                    '<table class="form-table">' +
+                    '<tr><th>Order ID:</th><td><a href="' + escapeHtml(data.order_edit_url) + '" target="_blank">#' + data.order_id + '</a></td></tr>' +
+                    '<tr><th>Order Status:</th><td>' + escapeHtml(data.order_status) + '</td></tr>' +
+                    '<tr><th>Order Total:</th><td>' + data.order_total + '</td></tr>' +
+                    '</table>' +
+                    orderItemsHtml +
+                    '</div>' +
+
+                    // Customer Info
+                    '<div class="monarch-detail-section">' +
+                    '<h3>Customer Information</h3>' +
+                    '<table class="form-table">' +
+                    '<tr><th>Name:</th><td>' + escapeHtml(data.customer_name) + '</td></tr>' +
+                    '<tr><th>Email:</th><td><a href="mailto:' + escapeHtml(data.customer_email) + '">' + escapeHtml(data.customer_email) + '</a></td></tr>' +
+                    (data.customer_phone ? '<tr><th>Phone:</th><td>' + escapeHtml(data.customer_phone) + '</td></tr>' : '') +
+                    '</table>' +
+                    '</div>' +
+
+                    // Billing Address
+                    '<div class="monarch-detail-section">' +
+                    '<h3>Billing Address</h3>' +
+                    '<p>' + data.billing_address + '</p>' +
+                    '</div>' +
+
+                    // Monarch IDs
+                    '<div class="monarch-detail-section">' +
+                    '<h3>Monarch Details</h3>' +
+                    '<table class="form-table">' +
+                    '<tr><th>Organization ID:</th><td><code style="font-size: 11px;">' + escapeHtml(data.monarch_org_id) + '</code></td></tr>' +
+                    '<tr><th>PayToken ID:</th><td><code style="font-size: 11px;">' + escapeHtml(data.paytoken_id) + '</code></td></tr>' +
+                    '</table>' +
+                    '</div>' +
+
+                    '</div>' +
+                    '<div class="monarch-modal-footer">' +
+                    '<a href="' + escapeHtml(data.order_edit_url) + '" class="button button-primary" target="_blank">View Order</a> ' +
+                    '<button type="button" class="button monarch-modal-close-btn">Close</button>' +
+                    '</div>' +
+                    '</div>' +
+                    '</div>';
+
+                // Append modal to body
+                $('body').append(modalHtml);
+
+                // Close modal handlers
+                $(document).on('click', '.monarch-modal-close-btn', function() {
+                    $('#monarch-transaction-modal').remove();
+                });
+
+                $(document).on('click', '.monarch-modal-overlay', function(e) {
+                    if ($(e.target).hasClass('monarch-modal-overlay')) {
+                        $('#monarch-transaction-modal').remove();
+                    }
+                });
+
+                // Close on Escape key
+                $(document).on('keydown.monarchModal', function(e) {
+                    if (e.key === 'Escape') {
+                        $('#monarch-transaction-modal').remove();
+                        $(document).off('keydown.monarchModal');
+                    }
+                });
+            }
+
+            // Helper function to escape HTML
+            function escapeHtml(text) {
+                if (!text) return '';
+                var div = document.createElement('div');
+                div.appendChild(document.createTextNode(text));
+                return div.innerHTML;
+            }
+        });
+        </script>
         <?php
     }
-    
+
     private function render_customers_tab() {
         global $wpdb;
 
