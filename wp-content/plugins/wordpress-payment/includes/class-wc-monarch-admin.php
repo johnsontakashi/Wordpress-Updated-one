@@ -678,7 +678,10 @@ class WC_Monarch_Admin {
     private function render_customers_tab() {
         global $wpdb;
 
-        // Get users with Monarch data
+        // Get all customers - both registered users and guest customers from orders
+        $customers = array();
+
+        // 1. Get registered users with Monarch data
         $users = get_users(array(
             'meta_query' => array(
                 array(
@@ -689,11 +692,97 @@ class WC_Monarch_Admin {
             'number' => 100
         ));
 
+        foreach ($users as $user) {
+            $org_id = get_user_meta($user->ID, '_monarch_org_id', true);
+            $paytoken_id = get_user_meta($user->ID, '_monarch_paytoken_id', true);
+            $connected_date = get_user_meta($user->ID, '_monarch_connected_date', true);
+
+            // Get billing address from user meta
+            $billing_first_name = get_user_meta($user->ID, 'billing_first_name', true);
+            $billing_last_name = get_user_meta($user->ID, 'billing_last_name', true);
+            $billing_address_1 = get_user_meta($user->ID, 'billing_address_1', true);
+            $billing_address_2 = get_user_meta($user->ID, 'billing_address_2', true);
+            $billing_city = get_user_meta($user->ID, 'billing_city', true);
+            $billing_state = get_user_meta($user->ID, 'billing_state', true);
+            $billing_postcode = get_user_meta($user->ID, 'billing_postcode', true);
+            $billing_country = get_user_meta($user->ID, 'billing_country', true);
+            $billing_phone = get_user_meta($user->ID, 'billing_phone', true);
+
+            $customers[$user->user_email] = array(
+                'type' => 'registered',
+                'user_id' => $user->ID,
+                'display_name' => $user->display_name,
+                'email' => $user->user_email,
+                'org_id' => $org_id,
+                'paytoken_id' => $paytoken_id,
+                'connected_date' => $connected_date,
+                'billing_first_name' => $billing_first_name,
+                'billing_last_name' => $billing_last_name,
+                'billing_address_1' => $billing_address_1,
+                'billing_address_2' => $billing_address_2,
+                'billing_city' => $billing_city,
+                'billing_state' => $billing_state,
+                'billing_postcode' => $billing_postcode,
+                'billing_country' => $billing_country,
+                'billing_phone' => $billing_phone,
+            );
+        }
+
+        // 2. Get guest customers from orders with Monarch ACH payments
+        $orders = wc_get_orders(array(
+            'payment_method' => 'monarch_ach',
+            'limit' => 200,
+            'orderby' => 'date',
+            'order' => 'DESC',
+        ));
+
+        foreach ($orders as $order) {
+            $customer_id = $order->get_customer_id();
+            $email = $order->get_billing_email();
+
+            // Skip if this customer is already in our list (registered user)
+            if (isset($customers[$email])) {
+                continue;
+            }
+
+            // Skip if this is a registered user (we already have them)
+            if ($customer_id > 0) {
+                continue;
+            }
+
+            // This is a guest customer
+            $org_id = $order->get_meta('_monarch_org_id', true);
+            if (empty($org_id)) {
+                continue;
+            }
+
+            $customers[$email] = array(
+                'type' => 'guest',
+                'user_id' => 0,
+                'display_name' => $order->get_billing_first_name() . ' ' . $order->get_billing_last_name(),
+                'email' => $email,
+                'org_id' => $org_id,
+                'paytoken_id' => $order->get_meta('_monarch_paytoken_id', true),
+                'connected_date' => $order->get_date_created() ? $order->get_date_created()->format('Y-m-d H:i:s') : '',
+                'billing_first_name' => $order->get_billing_first_name(),
+                'billing_last_name' => $order->get_billing_last_name(),
+                'billing_address_1' => $order->get_billing_address_1(),
+                'billing_address_2' => $order->get_billing_address_2(),
+                'billing_city' => $order->get_billing_city(),
+                'billing_state' => $order->get_billing_state(),
+                'billing_postcode' => $order->get_billing_postcode(),
+                'billing_country' => $order->get_billing_country(),
+                'billing_phone' => $order->get_billing_phone(),
+                'order_id' => $order->get_id(),
+            );
+        }
+
         ?>
         <div class="monarch-admin-section">
             <h2>Monarch Customers</h2>
+            <p style="color:#666; margin-bottom: 15px;">Shows all customers who have used Monarch ACH payments (both registered users and guest checkouts).</p>
 
-            <?php if (empty($users)): ?>
+            <?php if (empty($customers)): ?>
                 <p>No Monarch customers found.</p>
             <?php else: ?>
                 <table class="wp-list-table widefat fixed striped">
@@ -701,6 +790,7 @@ class WC_Monarch_Admin {
                         <tr>
                             <th>Customer</th>
                             <th>Email</th>
+                            <th>Type</th>
                             <th>Billing Address</th>
                             <th>Monarch Org ID</th>
                             <th>Bank Status</th>
@@ -709,71 +799,63 @@ class WC_Monarch_Admin {
                         </tr>
                     </thead>
                     <tbody>
-                        <?php foreach ($users as $user): ?>
+                        <?php foreach ($customers as $customer): ?>
                             <?php
-                            $org_id = get_user_meta($user->ID, '_monarch_org_id', true);
-                            $paytoken_id = get_user_meta($user->ID, '_monarch_paytoken_id', true);
-                            $connected_date = get_user_meta($user->ID, '_monarch_connected_date', true);
-
-                            // Get billing address from user meta (WooCommerce stores these)
-                            $billing_first_name = get_user_meta($user->ID, 'billing_first_name', true);
-                            $billing_last_name = get_user_meta($user->ID, 'billing_last_name', true);
-                            $billing_address_1 = get_user_meta($user->ID, 'billing_address_1', true);
-                            $billing_address_2 = get_user_meta($user->ID, 'billing_address_2', true);
-                            $billing_city = get_user_meta($user->ID, 'billing_city', true);
-                            $billing_state = get_user_meta($user->ID, 'billing_state', true);
-                            $billing_postcode = get_user_meta($user->ID, 'billing_postcode', true);
-                            $billing_country = get_user_meta($user->ID, 'billing_country', true);
-                            $billing_phone = get_user_meta($user->ID, 'billing_phone', true);
-
                             // Build billing address string
                             $billing_address_parts = array();
-                            if ($billing_address_1) {
-                                $billing_address_parts[] = $billing_address_1;
+                            if ($customer['billing_address_1']) {
+                                $billing_address_parts[] = $customer['billing_address_1'];
                             }
-                            if ($billing_address_2) {
-                                $billing_address_parts[] = $billing_address_2;
+                            if ($customer['billing_address_2']) {
+                                $billing_address_parts[] = $customer['billing_address_2'];
                             }
-                            $city_state_zip = array_filter(array($billing_city, $billing_state, $billing_postcode));
+                            $city_state_zip = array_filter(array($customer['billing_city'], $customer['billing_state'], $customer['billing_postcode']));
                             if (!empty($city_state_zip)) {
                                 $billing_address_parts[] = implode(', ', $city_state_zip);
                             }
-                            if ($billing_country) {
-                                $country_name = WC()->countries->countries[$billing_country] ?? $billing_country;
+                            if ($customer['billing_country']) {
+                                $country_name = WC()->countries->countries[$customer['billing_country']] ?? $customer['billing_country'];
                                 $billing_address_parts[] = $country_name;
                             }
 
-                            $has_billing_address = !empty($billing_address_1) || !empty($billing_city);
+                            $has_billing_address = !empty($customer['billing_address_1']) || !empty($customer['billing_city']);
                             ?>
                             <tr>
-                                <td><?php echo esc_html($user->display_name); ?></td>
+                                <td><?php echo esc_html($customer['display_name']); ?></td>
                                 <td>
-                                    <a href="mailto:<?php echo esc_attr($user->user_email); ?>">
-                                        <?php echo esc_html($user->user_email); ?>
+                                    <a href="mailto:<?php echo esc_attr($customer['email']); ?>">
+                                        <?php echo esc_html($customer['email']); ?>
                                     </a>
+                                </td>
+                                <td>
+                                    <?php if ($customer['type'] === 'registered'): ?>
+                                        <span class="status-badge status-completed">Registered</span>
+                                    <?php else: ?>
+                                        <span class="status-badge status-pending">Guest</span>
+                                    <?php endif; ?>
                                 </td>
                                 <td>
                                     <?php if ($has_billing_address): ?>
                                         <div class="billing-address-cell">
-                                            <?php if ($billing_first_name || $billing_last_name): ?>
-                                                <strong><?php echo esc_html($billing_first_name . ' ' . $billing_last_name); ?></strong><br>
+                                            <?php if ($customer['billing_first_name'] || $customer['billing_last_name']): ?>
+                                                <strong><?php echo esc_html($customer['billing_first_name'] . ' ' . $customer['billing_last_name']); ?></strong><br>
                                             <?php endif; ?>
                                             <?php
                                             foreach ($billing_address_parts as $part) {
                                                 echo esc_html($part) . '<br>';
                                             }
                                             ?>
-                                            <?php if ($billing_phone): ?>
-                                                <small>Phone: <?php echo esc_html($billing_phone); ?></small>
+                                            <?php if ($customer['billing_phone']): ?>
+                                                <small>Phone: <?php echo esc_html($customer['billing_phone']); ?></small>
                                             <?php endif; ?>
                                         </div>
                                     <?php else: ?>
                                         <span style="color:#999;">No billing address</span>
                                     <?php endif; ?>
                                 </td>
-                                <td><code style="font-size: 11px;"><?php echo esc_html($org_id); ?></code></td>
+                                <td><code style="font-size: 11px;"><?php echo esc_html($customer['org_id']); ?></code></td>
                                 <td>
-                                    <?php if ($paytoken_id): ?>
+                                    <?php if ($customer['paytoken_id']): ?>
                                         <span class="status-badge status-completed">Connected</span>
                                     <?php else: ?>
                                         <span class="status-badge status-pending">Not connected</span>
@@ -781,17 +863,25 @@ class WC_Monarch_Admin {
                                 </td>
                                 <td>
                                     <?php
-                                    if ($connected_date) {
-                                        echo esc_html(date('M j, Y', strtotime($connected_date)));
+                                    if ($customer['connected_date']) {
+                                        echo esc_html(date('M j, Y', strtotime($customer['connected_date'])));
                                     } else {
                                         echo '<span style="color:#999;">—</span>';
                                     }
                                     ?>
                                 </td>
                                 <td>
-                                    <a href="<?php echo get_edit_user_link($user->ID); ?>" class="button button-small">
-                                        Edit User
-                                    </a>
+                                    <?php if ($customer['type'] === 'registered'): ?>
+                                        <a href="<?php echo get_edit_user_link($customer['user_id']); ?>" class="button button-small">
+                                            Edit User
+                                        </a>
+                                    <?php elseif (isset($customer['order_id'])): ?>
+                                        <a href="<?php echo admin_url('post.php?post=' . $customer['order_id'] . '&action=edit'); ?>" class="button button-small">
+                                            View Order
+                                        </a>
+                                    <?php else: ?>
+                                        <span style="color:#999;">—</span>
+                                    <?php endif; ?>
                                 </td>
                             </tr>
                         <?php endforeach; ?>
