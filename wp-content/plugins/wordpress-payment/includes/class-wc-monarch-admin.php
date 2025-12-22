@@ -681,6 +681,25 @@ class WC_Monarch_Admin {
         // Get all customers - both registered users and guest customers from orders
         $customers = array();
 
+        // First, get all Monarch ACH orders to have accurate billing emails
+        $all_orders = wc_get_orders(array(
+            'payment_method' => 'monarch_ach',
+            'limit' => 500,
+            'orderby' => 'date',
+            'order' => 'DESC',
+        ));
+
+        // Build a map of user_id => latest order billing email
+        $user_billing_emails = array();
+        $user_latest_orders = array();
+        foreach ($all_orders as $order) {
+            $customer_id = $order->get_customer_id();
+            if ($customer_id > 0 && !isset($user_billing_emails[$customer_id])) {
+                $user_billing_emails[$customer_id] = $order->get_billing_email();
+                $user_latest_orders[$customer_id] = $order;
+            }
+        }
+
         // 1. Get registered users with Monarch data
         $users = get_users(array(
             'meta_query' => array(
@@ -697,22 +716,47 @@ class WC_Monarch_Admin {
             $paytoken_id = get_user_meta($user->ID, '_monarch_paytoken_id', true);
             $connected_date = get_user_meta($user->ID, '_monarch_connected_date', true);
 
-            // Get billing address from user meta
-            $billing_first_name = get_user_meta($user->ID, 'billing_first_name', true);
-            $billing_last_name = get_user_meta($user->ID, 'billing_last_name', true);
-            $billing_address_1 = get_user_meta($user->ID, 'billing_address_1', true);
-            $billing_address_2 = get_user_meta($user->ID, 'billing_address_2', true);
-            $billing_city = get_user_meta($user->ID, 'billing_city', true);
-            $billing_state = get_user_meta($user->ID, 'billing_state', true);
-            $billing_postcode = get_user_meta($user->ID, 'billing_postcode', true);
-            $billing_country = get_user_meta($user->ID, 'billing_country', true);
-            $billing_phone = get_user_meta($user->ID, 'billing_phone', true);
+            // Get billing email - prefer from latest order, then user meta, then account email
+            $billing_email = get_user_meta($user->ID, 'billing_email', true);
+            if (isset($user_billing_emails[$user->ID])) {
+                $billing_email = $user_billing_emails[$user->ID];
+            }
+            if (empty($billing_email)) {
+                $billing_email = $user->user_email;
+            }
 
-            $customers[$user->user_email] = array(
+            // Get billing address - prefer from latest order, then user meta
+            if (isset($user_latest_orders[$user->ID])) {
+                $latest_order = $user_latest_orders[$user->ID];
+                $billing_first_name = $latest_order->get_billing_first_name();
+                $billing_last_name = $latest_order->get_billing_last_name();
+                $billing_address_1 = $latest_order->get_billing_address_1();
+                $billing_address_2 = $latest_order->get_billing_address_2();
+                $billing_city = $latest_order->get_billing_city();
+                $billing_state = $latest_order->get_billing_state();
+                $billing_postcode = $latest_order->get_billing_postcode();
+                $billing_country = $latest_order->get_billing_country();
+                $billing_phone = $latest_order->get_billing_phone();
+            } else {
+                $billing_first_name = get_user_meta($user->ID, 'billing_first_name', true);
+                $billing_last_name = get_user_meta($user->ID, 'billing_last_name', true);
+                $billing_address_1 = get_user_meta($user->ID, 'billing_address_1', true);
+                $billing_address_2 = get_user_meta($user->ID, 'billing_address_2', true);
+                $billing_city = get_user_meta($user->ID, 'billing_city', true);
+                $billing_state = get_user_meta($user->ID, 'billing_state', true);
+                $billing_postcode = get_user_meta($user->ID, 'billing_postcode', true);
+                $billing_country = get_user_meta($user->ID, 'billing_country', true);
+                $billing_phone = get_user_meta($user->ID, 'billing_phone', true);
+            }
+
+            // Use billing email as key to avoid duplicates
+            $customers[$billing_email] = array(
                 'type' => 'registered',
                 'user_id' => $user->ID,
-                'display_name' => $user->display_name,
-                'email' => $user->user_email,
+                'display_name' => $billing_first_name && $billing_last_name
+                    ? $billing_first_name . ' ' . $billing_last_name
+                    : $user->display_name,
+                'email' => $billing_email,
                 'org_id' => $org_id,
                 'paytoken_id' => $paytoken_id,
                 'connected_date' => $connected_date,
@@ -729,18 +773,11 @@ class WC_Monarch_Admin {
         }
 
         // 2. Get guest customers from orders with Monarch ACH payments
-        $orders = wc_get_orders(array(
-            'payment_method' => 'monarch_ach',
-            'limit' => 200,
-            'orderby' => 'date',
-            'order' => 'DESC',
-        ));
-
-        foreach ($orders as $order) {
+        foreach ($all_orders as $order) {
             $customer_id = $order->get_customer_id();
             $email = $order->get_billing_email();
 
-            // Skip if this customer is already in our list (registered user)
+            // Skip if this customer is already in our list
             if (isset($customers[$email])) {
                 continue;
             }
@@ -855,10 +892,17 @@ class WC_Monarch_Admin {
                                 </td>
                                 <td><code style="font-size: 11px;"><?php echo esc_html($customer['org_id']); ?></code></td>
                                 <td>
-                                    <?php if ($customer['paytoken_id']): ?>
-                                        <span class="status-badge status-completed">Connected</span>
-                                    <?php else: ?>
-                                        <span class="status-badge status-pending">Not connected</span>
+                                    <?php
+                                    // Bank is linked if org_id exists (which it must to be in this list)
+                                    // Paytoken indicates if they're ready to pay now or need to re-authorize
+                                    if ($customer['org_id']):
+                                        if ($customer['paytoken_id']): ?>
+                                            <span class="status-badge status-completed">Ready to Pay</span>
+                                        <?php else: ?>
+                                            <span class="status-badge status-live">Bank Linked</span>
+                                        <?php endif;
+                                    else: ?>
+                                        <span class="status-badge status-pending">Not linked</span>
                                     <?php endif; ?>
                                 </td>
                                 <td>
