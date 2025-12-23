@@ -800,14 +800,10 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             $dob_raw = sanitize_text_field($_POST['monarch_dob']);
             $dob = date('m/d/Y', strtotime($dob_raw)); // Convert to mm/dd/yyyy
 
-            // Generate unique email for Monarch to avoid "email already in use" errors
-            $email_parts = explode('@', $user_email);
-            $unique_email = $email_parts[0] . '+wp' . $user_id . '_' . time() . '@' . ($email_parts[1] ?? 'example.com');
-
             $customer_data = array(
                 'first_name' => $is_guest ? sanitize_text_field($_POST['billing_first_name']) : ($current_user->user_firstname ?: sanitize_text_field($_POST['billing_first_name'])),
                 'last_name' => $is_guest ? sanitize_text_field($_POST['billing_last_name']) : ($current_user->user_lastname ?: sanitize_text_field($_POST['billing_last_name'])),
-                'email' => $unique_email,
+                'email' => $user_email,
                 'password' => wp_generate_password(16, true, true),
                 'phone' => $phone,
                 'company_name' => sanitize_text_field($_POST['monarch_company']),
@@ -1520,14 +1516,10 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             $dob_raw = sanitize_text_field($_POST['monarch_dob']);
             $dob = date('m/d/Y', strtotime($dob_raw));
 
-            // Generate unique email for Monarch
-            $email_parts = explode('@', $user_email);
-            $unique_email = $email_parts[0] . '+wp' . $user_id . '_' . time() . '@' . ($email_parts[1] ?? 'example.com');
-
             $customer_data = array(
                 'first_name' => $is_guest ? sanitize_text_field($_POST['billing_first_name']) : ($current_user->user_firstname ?: sanitize_text_field($_POST['billing_first_name'])),
                 'last_name' => $is_guest ? sanitize_text_field($_POST['billing_last_name']) : ($current_user->user_lastname ?: sanitize_text_field($_POST['billing_last_name'])),
-                'email' => $unique_email,
+                'email' => $user_email,
                 'password' => wp_generate_password(16, true, true),
                 'phone' => $phone,
                 'company_name' => sanitize_text_field($_POST['monarch_company'] ?? ''),
