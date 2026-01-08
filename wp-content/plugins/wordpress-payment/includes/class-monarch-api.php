@@ -142,6 +142,25 @@ class Monarch_API {
     }
 
     /**
+     * Get user by email
+     * Check if an organization already exists for this email
+     * Per Monarch documentation: GET /v1/getUserByEmail/{userEmail}
+     * @param string $email The user's email address
+     * @return array Response with success status and user/org data if exists
+     */
+    public function get_user_by_email($email) {
+        $url = $this->base_url . '/getUserByEmail/' . urlencode($email);
+
+        $logger = WC_Monarch_Logger::instance();
+        $logger->debug('get_user_by_email called', array(
+            'email' => $email,
+            'full_url' => $url
+        ));
+
+        return $this->make_request('GET', $url);
+    }
+
+    /**
      * Get latest PayToken for an organization
      * Used after embedded bank linking to retrieve the paytoken
      * Per Monarch documentation: GET /v1/getlatestpaytoken/{organizationID}

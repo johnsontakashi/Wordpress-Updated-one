@@ -816,7 +816,113 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 'country' => sanitize_text_field($_POST['billing_country'])
             );
 
-            // Create organization
+            // STEP 0: Check if user already exists by email (prevents "email already exists" error)
+            $logger->debug('Checking if user already exists by email', array('email' => $user_email));
+            $existing_user = $monarch_api->get_user_by_email($user_email);
+
+            if ($existing_user['success'] && !empty($existing_user['data'])) {
+                // User already exists - use existing org_id instead of creating new one
+                $logger->debug('Existing user found by email', array(
+                    'email' => $user_email,
+                    'existing_data' => $existing_user['data']
+                ));
+
+                // Extract org_id from existing user data
+                $org_id = $existing_user['data']['orgId'] ?? $existing_user['data']['org_id'] ?? null;
+                $user_id = $existing_user['data']['_id'] ?? $existing_user['data']['userId'] ?? null;
+
+                if ($org_id) {
+                    // Get bank linking URL for existing organization
+                    $api_url = $this->testmode ? 'https://devapi.monarch.is/v1' : 'https://api.monarch.is/v1';
+                    $bank_linking_url = '';
+
+                    // First try: /partner/embedded/{org_id}
+                    $embed_response = wp_remote_get($api_url . '/partner/embedded/' . $org_id, array(
+                        'headers' => array(
+                            'X-API-KEY' => $this->api_key,
+                            'X-APP-ID' => $this->app_id,
+                            'accept' => 'application/json'
+                        ),
+                        'timeout' => 30
+                    ));
+
+                    if (!is_wp_error($embed_response)) {
+                        $embed_body = json_decode(wp_remote_retrieve_body($embed_response), true);
+                        $bank_linking_url = $embed_body['partner_embedded_url'] ?? $embed_body['url'] ?? '';
+                        $logger->debug('Embed endpoint response', array(
+                            'status_code' => wp_remote_retrieve_response_code($embed_response),
+                            'body' => $embed_body
+                        ));
+                    } else {
+                        $logger->debug('Embed endpoint error', array(
+                            'error' => $embed_response->get_error_message()
+                        ));
+                    }
+
+                    // Second try: /organization/{org_id}
+                    if (empty($bank_linking_url)) {
+                        $org_response = wp_remote_get($api_url . '/organization/' . $org_id, array(
+                            'headers' => array(
+                                'X-API-KEY' => $this->api_key,
+                                'X-APP-ID' => $this->app_id,
+                                'accept' => 'application/json'
+                            ),
+                            'timeout' => 30
+                        ));
+
+                        if (!is_wp_error($org_response)) {
+                            $org_body = json_decode(wp_remote_retrieve_body($org_response), true);
+                            $bank_linking_url = $org_body['partner_embedded_url'] ?? $org_body['bankLinkingUrl'] ?? '';
+                            $logger->debug('Organization endpoint response', array(
+                                'status_code' => wp_remote_retrieve_response_code($org_response),
+                                'body' => $org_body
+                            ));
+                        } else {
+                            $logger->debug('Organization endpoint error', array(
+                                'error' => $org_response->get_error_message()
+                            ));
+                        }
+                    }
+
+                    // If still no URL, return error instead of empty URL
+                    if (empty($bank_linking_url)) {
+                        $logger->error('Failed to get bank linking URL for existing organization', array(
+                            'org_id' => $org_id,
+                            'user_id' => $user_id
+                        ));
+                        wp_send_json_error('Unable to retrieve bank linking URL. Please try again or contact support.');
+                        return;
+                    }
+
+                    $logger->debug('Using existing organization', array(
+                        'org_id' => $org_id,
+                        'user_id' => $user_id,
+                        'bank_linking_url' => $bank_linking_url
+                    ));
+
+                    // Save organization data
+                    if ($is_guest) {
+                        WC()->session->set('monarch_temp_org_id', $org_id);
+                        WC()->session->set('monarch_temp_user_id', $user_id);
+                    } else {
+                        $customer_id = get_current_user_id();
+                        update_user_meta($customer_id, '_monarch_temp_org_id', $org_id);
+                        update_user_meta($customer_id, '_monarch_temp_user_id', $user_id);
+                    }
+
+                    // Return existing organization data with bank linking URL
+                    wp_send_json_success(array(
+                        'org_id' => $org_id,
+                        'user_id' => $user_id,
+                        'bank_linking_url' => $bank_linking_url,
+                        'existing_user' => true
+                    ));
+                    return;
+                }
+            }
+
+            // STEP 1: Create organization (only if user doesn't exist)
+            $logger->debug('Creating new organization', array('email' => $user_email));
             $org_result = $monarch_api->create_organization($customer_data);
 
             if (!$org_result['success']) {
@@ -1532,22 +1638,52 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 'country' => sanitize_text_field($_POST['billing_country'])
             );
 
-            // Step 1: Create organization
-            $org_result = $monarch_api->create_organization($customer_data);
+            $logger = WC_Monarch_Logger::instance();
 
-            if (!$org_result['success']) {
-                wp_send_json_error('Organization creation failed: ' . $org_result['error']);
+            // STEP 0: Check if user already exists by email (prevents "email already exists" error)
+            $logger->debug('Manual entry: Checking if user already exists by email', array('email' => $user_email));
+            $existing_user = $monarch_api->get_user_by_email($user_email);
+
+            $org_id = null;
+            $user_id = null;
+            $org_result = null; // Initialize to prevent undefined variable errors
+            $is_existing_user = false;
+
+            if ($existing_user['success'] && !empty($existing_user['data'])) {
+                // User already exists - use existing org_id
+                $logger->debug('Manual entry: Existing user found by email', array(
+                    'email' => $user_email,
+                    'existing_data' => $existing_user['data']
+                ));
+
+                $org_id = $existing_user['data']['orgId'] ?? $existing_user['data']['org_id'] ?? null;
+                $user_id = $existing_user['data']['_id'] ?? $existing_user['data']['userId'] ?? null;
+                $is_existing_user = true;
             }
 
-            $user_id = $org_result['data']['_id'];
-            $org_id = $org_result['data']['orgId'];
+            // Step 1: Create organization (only if user doesn't exist)
+            if (!$org_id) {
+                $logger->debug('Manual entry: Creating new organization', array('email' => $user_email));
+                $org_result = $monarch_api->create_organization($customer_data);
 
-            // Log organization creation
-            $logger = WC_Monarch_Logger::instance();
-            $logger->log_customer_event('organization_created_manual', $customer_id, array(
-                'org_id' => $org_id,
-                'user_id' => $user_id
-            ));
+                if (!$org_result['success']) {
+                    wp_send_json_error('Organization creation failed: ' . $org_result['error']);
+                }
+
+                $user_id = $org_result['data']['_id'];
+                $org_id = $org_result['data']['orgId'];
+
+                // Log organization creation
+                $logger->log_customer_event('organization_created_manual', $customer_id, array(
+                    'org_id' => $org_id,
+                    'user_id' => $user_id
+                ));
+            } else {
+                $logger->debug('Manual entry: Using existing organization', array(
+                    'org_id' => $org_id,
+                    'user_id' => $user_id
+                ));
+            }
 
             // Step 2: Create PayToken with bank details
             $bank_data = array(
@@ -1579,10 +1715,10 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 WC()->session->set('monarch_user_id', $user_id);
                 WC()->session->set('monarch_paytoken_id', $paytoken_id);
                 WC()->session->set('monarch_connected_date', current_time('mysql'));
-                
-                // Store the purchaser org's API credentials for transactions
-                $org_api = $org_result['data']['api'] ?? null;
-                if ($org_api) {
+
+                // Store the purchaser org's API credentials for transactions (only for new organizations)
+                if ($org_result && isset($org_result['data']['api'])) {
+                    $org_api = $org_result['data']['api'];
                     $credentials_key = $this->testmode ? 'sandbox' : 'prod';
                     $org_credentials = $org_api[$credentials_key] ?? null;
                     if ($org_credentials) {
@@ -1601,9 +1737,9 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 update_user_meta($customer_id, '_monarch_merchant_org_id', $this->merchant_org_id);
                 update_user_meta($customer_id, '_monarch_testmode', $this->testmode ? 'yes' : 'no');
 
-                // Store the purchaser org's API credentials for transactions
-                $org_api = $org_result['data']['api'] ?? null;
-                if ($org_api) {
+                // Store the purchaser org's API credentials for transactions (only for new organizations)
+                if ($org_result && isset($org_result['data']['api'])) {
+                    $org_api = $org_result['data']['api'];
                     $credentials_key = $this->testmode ? 'sandbox' : 'prod';
                     $org_credentials = $org_api[$credentials_key] ?? null;
                     if ($org_credentials) {

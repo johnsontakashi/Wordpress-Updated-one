@@ -1,6 +1,6 @@
 # Monarch WooCommerce Payment Gateway - Developer Guide
 
-**Version:** 1.0.7
+**Version:** 1.0.8
 **Requires WordPress:** 5.0+
 **Requires WooCommerce:** 5.0+
 **Tested up to:** WordPress 6.4, WooCommerce 8.0
@@ -308,6 +308,13 @@ For plugin-specific issues, check the logs and transaction details in the WordPr
 ---
 
 ## Changelog
+
+### Version 1.0.8
+- Added email lookup before organization creation (prevents "email already exists" error)
+- Uses `/getUserByEmail` endpoint to check for existing users
+- If user exists, retrieves existing org_id instead of creating duplicate
+- Follows Monarch's 4-step embedded bank linking flow exactly
+- Applied same fix to manual bank entry flow
 
 ### Version 1.0.7
 - Fixed email handling - uses customer's actual email
