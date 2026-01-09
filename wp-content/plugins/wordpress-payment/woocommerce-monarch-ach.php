@@ -16,8 +16,18 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-// Check if WooCommerce is active
-if (!in_array('woocommerce/woocommerce.php', apply_filters('active_plugins', get_option('active_plugins')))) {
+// Check if WooCommerce is active (supports both single site and multisite)
+$active_plugins = apply_filters('active_plugins', get_option('active_plugins'));
+
+// Check for multisite network-activated plugins
+if (is_multisite()) {
+    $network_plugins = get_site_option('active_sitewide_plugins');
+    if ($network_plugins) {
+        $active_plugins = array_merge($active_plugins, array_keys($network_plugins));
+    }
+}
+
+if (!in_array('woocommerce/woocommerce.php', $active_plugins) && !class_exists('WooCommerce')) {
     return;
 }
 
