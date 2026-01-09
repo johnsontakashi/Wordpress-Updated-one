@@ -855,45 +855,92 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             // Log the COMPLETE response from getUserByEmail for debugging
             $logger->debug('getUserByEmail FULL RESPONSE', array(
                 'email_checked' => $user_email,
+                'user_exists' => $existing_user['user_exists'] ?? 'NOT SET',
                 'success' => $existing_user['success'] ?? 'NOT SET',
+                'org_id_direct' => $existing_user['org_id'] ?? 'NOT SET',
                 'data' => $existing_user['data'] ?? 'NOT SET',
                 'error' => $existing_user['error'] ?? 'NOT SET',
                 'status_code' => $existing_user['status_code'] ?? 'NOT SET',
                 'full_response' => $existing_user
             ));
 
-            // Check various possible response structures
-            $has_data = !empty($existing_user['data']);
-            $is_array_data = is_array($existing_user['data'] ?? null);
-            $data_count = $is_array_data ? count($existing_user['data']) : 0;
+            // Check if user exists using the new user_exists flag
+            $user_exists = $existing_user['user_exists'] ?? false;
+            $found_org_id = null;
+            $found_user_id = null;
 
-            $logger->debug('Response analysis', array(
-                'success_value' => $existing_user['success'],
-                'has_data' => $has_data,
-                'is_array_data' => $is_array_data,
-                'data_count' => $data_count,
-                'data_type' => gettype($existing_user['data'] ?? null)
+            if ($user_exists) {
+                // User exists - extract org_id
+                // First check if API returned org_id directly
+                $found_org_id = $existing_user['org_id'] ?? null;
+
+                // If not, search in data
+                if (!$found_org_id && !empty($existing_user['data'])) {
+                    $data = $existing_user['data'];
+                    $found_org_id = $data['orgId'] ?? $data['org_id'] ?? $data['organizationId'] ?? $data['organization_id'] ?? null;
+                    $found_user_id = $data['_id'] ?? $data['userId'] ?? $data['user_id'] ?? $data['id'] ?? null;
+                }
+
+                // Deep search as last resort
+                if (!$found_org_id) {
+                    $found_org_id = $this->find_org_id_recursive($existing_user);
+                }
+
+                $logger->debug('User EXISTS - extracted org_id', array(
+                    'found_org_id' => $found_org_id,
+                    'found_user_id' => $found_user_id
+                ));
+            }
+
+            $logger->debug('========== EMAIL LOOKUP END ==========', array(
+                'user_exists' => $user_exists,
+                'final_org_id' => $found_org_id,
+                'final_user_id' => $found_user_id,
+                'will_use_existing' => $user_exists && !empty($found_org_id)
             ));
-            $logger->debug('========== EMAIL LOOKUP END ==========');
 
-            if ($existing_user['success'] && !empty($existing_user['data'])) {
+            if ($user_exists && $found_org_id) {
                 // User already exists - use existing org_id instead of creating new one
-                $logger->debug('Existing user found by email', array(
+                $logger->debug('SUCCESS: Existing user found by email - will NOT create new organization', array(
                     'email' => $user_email,
-                    'existing_data' => $existing_user['data']
+                    'org_id' => $found_org_id,
+                    'user_id' => $found_user_id
                 ));
 
-                // Extract org_id from existing user data
-                $org_id = $existing_user['data']['orgId'] ?? $existing_user['data']['org_id'] ?? null;
-                $user_id = $existing_user['data']['_id'] ?? $existing_user['data']['userId'] ?? null;
+                // Use the found values
+                $org_id = $found_org_id;
+                $user_id = $found_user_id;
 
-                if ($org_id) {
-                    // Get bank linking URL for existing organization
-                    $api_url = $this->testmode ? 'https://devapi.monarch.is/v1' : 'https://api.monarch.is/v1';
-                    $bank_linking_url = '';
+                // Get bank linking URL for existing organization
+                $api_url = $this->testmode ? 'https://devapi.monarch.is/v1' : 'https://api.monarch.is/v1';
+                $bank_linking_url = '';
 
-                    // First try: /partner/embedded/{org_id}
-                    $embed_response = wp_remote_get($api_url . '/partner/embedded/' . $org_id, array(
+                // First try: /partner/embedded/{org_id}
+                $embed_response = wp_remote_get($api_url . '/partner/embedded/' . $org_id, array(
+                    'headers' => array(
+                        'X-API-KEY' => $this->api_key,
+                        'X-APP-ID' => $this->app_id,
+                        'accept' => 'application/json'
+                    ),
+                    'timeout' => 30
+                ));
+
+                if (!is_wp_error($embed_response)) {
+                    $embed_body = json_decode(wp_remote_retrieve_body($embed_response), true);
+                    $bank_linking_url = $embed_body['partner_embedded_url'] ?? $embed_body['url'] ?? '';
+                    $logger->debug('Embed endpoint response', array(
+                        'status_code' => wp_remote_retrieve_response_code($embed_response),
+                        'body' => $embed_body
+                    ));
+                } else {
+                    $logger->debug('Embed endpoint error', array(
+                        'error' => $embed_response->get_error_message()
+                    ));
+                }
+
+                // Second try: /organization/{org_id}
+                if (empty($bank_linking_url)) {
+                    $org_response = wp_remote_get($api_url . '/organization/' . $org_id, array(
                         'headers' => array(
                             'X-API-KEY' => $this->api_key,
                             'X-APP-ID' => $this->app_id,
@@ -902,79 +949,54 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                         'timeout' => 30
                     ));
 
-                    if (!is_wp_error($embed_response)) {
-                        $embed_body = json_decode(wp_remote_retrieve_body($embed_response), true);
-                        $bank_linking_url = $embed_body['partner_embedded_url'] ?? $embed_body['url'] ?? '';
-                        $logger->debug('Embed endpoint response', array(
-                            'status_code' => wp_remote_retrieve_response_code($embed_response),
-                            'body' => $embed_body
+                    if (!is_wp_error($org_response)) {
+                        $org_body = json_decode(wp_remote_retrieve_body($org_response), true);
+                        $bank_linking_url = $org_body['partner_embedded_url'] ?? $org_body['bankLinkingUrl'] ?? '';
+                        $logger->debug('Organization endpoint response', array(
+                            'status_code' => wp_remote_retrieve_response_code($org_response),
+                            'body' => $org_body
                         ));
                     } else {
-                        $logger->debug('Embed endpoint error', array(
-                            'error' => $embed_response->get_error_message()
+                        $logger->debug('Organization endpoint error', array(
+                            'error' => $org_response->get_error_message()
                         ));
                     }
+                }
 
-                    // Second try: /organization/{org_id}
-                    if (empty($bank_linking_url)) {
-                        $org_response = wp_remote_get($api_url . '/organization/' . $org_id, array(
-                            'headers' => array(
-                                'X-API-KEY' => $this->api_key,
-                                'X-APP-ID' => $this->app_id,
-                                'accept' => 'application/json'
-                            ),
-                            'timeout' => 30
-                        ));
-
-                        if (!is_wp_error($org_response)) {
-                            $org_body = json_decode(wp_remote_retrieve_body($org_response), true);
-                            $bank_linking_url = $org_body['partner_embedded_url'] ?? $org_body['bankLinkingUrl'] ?? '';
-                            $logger->debug('Organization endpoint response', array(
-                                'status_code' => wp_remote_retrieve_response_code($org_response),
-                                'body' => $org_body
-                            ));
-                        } else {
-                            $logger->debug('Organization endpoint error', array(
-                                'error' => $org_response->get_error_message()
-                            ));
-                        }
-                    }
-
-                    // If still no URL, return error instead of empty URL
-                    if (empty($bank_linking_url)) {
-                        $logger->error('Failed to get bank linking URL for existing organization', array(
-                            'org_id' => $org_id,
-                            'user_id' => $user_id
-                        ));
-                        wp_send_json_error('Unable to retrieve bank linking URL. Please try again or contact support.');
-                        return;
-                    }
-
-                    $logger->debug('Using existing organization', array(
+                // If still no URL, return error instead of empty URL
+                if (empty($bank_linking_url)) {
+                    $logger->error('Failed to get bank linking URL for existing organization', array(
                         'org_id' => $org_id,
-                        'user_id' => $user_id,
-                        'bank_linking_url' => $bank_linking_url
+                        'user_id' => $user_id
                     ));
-
-                    // Save organization data
-                    if ($is_guest) {
-                        WC()->session->set('monarch_temp_org_id', $org_id);
-                        WC()->session->set('monarch_temp_user_id', $user_id);
-                    } else {
-                        $customer_id = get_current_user_id();
-                        update_user_meta($customer_id, '_monarch_temp_org_id', $org_id);
-                        update_user_meta($customer_id, '_monarch_temp_user_id', $user_id);
-                    }
-
-                    // Return existing organization data with bank linking URL
-                    wp_send_json_success(array(
-                        'org_id' => $org_id,
-                        'user_id' => $user_id,
-                        'bank_linking_url' => $bank_linking_url,
-                        'existing_user' => true
-                    ));
+                    wp_send_json_error('Unable to retrieve bank linking URL. Please try again or contact support.');
                     return;
                 }
+
+                $logger->debug('Using existing organization', array(
+                    'org_id' => $org_id,
+                    'user_id' => $user_id,
+                    'bank_linking_url' => $bank_linking_url
+                ));
+
+                // Save organization data
+                if ($is_guest) {
+                    WC()->session->set('monarch_temp_org_id', $org_id);
+                    WC()->session->set('monarch_temp_user_id', $user_id);
+                } else {
+                    $customer_id = get_current_user_id();
+                    update_user_meta($customer_id, '_monarch_temp_org_id', $org_id);
+                    update_user_meta($customer_id, '_monarch_temp_user_id', $user_id);
+                }
+
+                // Return existing organization data with bank linking URL
+                wp_send_json_success(array(
+                    'org_id' => $org_id,
+                    'user_id' => $user_id,
+                    'bank_linking_url' => $bank_linking_url,
+                    'existing_user' => true
+                ));
+                return;
             }
 
             // STEP 1: Create organization (only if user doesn't exist)
@@ -1748,42 +1770,61 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             // Log the COMPLETE response from getUserByEmail for debugging
             $logger->debug('Manual entry: getUserByEmail FULL RESPONSE', array(
                 'email_checked' => $user_email,
+                'user_exists' => $existing_user['user_exists'] ?? 'NOT SET',
                 'success' => $existing_user['success'] ?? 'NOT SET',
+                'org_id_direct' => $existing_user['org_id'] ?? 'NOT SET',
                 'data' => $existing_user['data'] ?? 'NOT SET',
                 'error' => $existing_user['error'] ?? 'NOT SET',
                 'status_code' => $existing_user['status_code'] ?? 'NOT SET',
                 'full_response' => $existing_user
             ));
 
-            // Check various possible response structures
-            $has_data = !empty($existing_user['data']);
-            $is_array_data = is_array($existing_user['data'] ?? null);
-            $data_count = $is_array_data ? count($existing_user['data']) : 0;
+            // Check if user exists using the new user_exists flag
+            $user_exists = $existing_user['user_exists'] ?? false;
+            $found_org_id = null;
+            $found_user_id = null;
 
-            $logger->debug('Manual entry: Response analysis', array(
-                'success_value' => $existing_user['success'],
-                'has_data' => $has_data,
-                'is_array_data' => $is_array_data,
-                'data_count' => $data_count,
-                'data_type' => gettype($existing_user['data'] ?? null)
-            ));
-            $logger->debug('========== MANUAL ENTRY: EMAIL LOOKUP END ==========');
+            if ($user_exists) {
+                // User exists - extract org_id
+                // First check if API returned org_id directly
+                $found_org_id = $existing_user['org_id'] ?? null;
 
-            $org_id = null;
-            $user_id = null;
-            $org_result = null; // Initialize to prevent undefined variable errors
-            $is_existing_user = false;
+                // If not, search in data
+                if (!$found_org_id && !empty($existing_user['data'])) {
+                    $data = $existing_user['data'];
+                    $found_org_id = $data['orgId'] ?? $data['org_id'] ?? $data['organizationId'] ?? $data['organization_id'] ?? null;
+                    $found_user_id = $data['_id'] ?? $data['userId'] ?? $data['user_id'] ?? $data['id'] ?? null;
+                }
 
-            if ($existing_user['success'] && !empty($existing_user['data'])) {
-                // User already exists - use existing org_id
-                $logger->debug('Manual entry: Existing user found by email', array(
-                    'email' => $user_email,
-                    'existing_data' => $existing_user['data']
+                // Deep search as last resort
+                if (!$found_org_id) {
+                    $found_org_id = $this->find_org_id_recursive($existing_user);
+                }
+
+                $logger->debug('Manual entry: User EXISTS - extracted org_id', array(
+                    'found_org_id' => $found_org_id,
+                    'found_user_id' => $found_user_id
                 ));
+            }
 
-                $org_id = $existing_user['data']['orgId'] ?? $existing_user['data']['org_id'] ?? null;
-                $user_id = $existing_user['data']['_id'] ?? $existing_user['data']['userId'] ?? null;
-                $is_existing_user = true;
+            $logger->debug('========== MANUAL ENTRY: EMAIL LOOKUP END ==========', array(
+                'user_exists' => $user_exists,
+                'final_org_id' => $found_org_id,
+                'final_user_id' => $found_user_id,
+                'will_use_existing' => $user_exists && !empty($found_org_id)
+            ));
+
+            $org_id = $found_org_id;
+            $user_id = $found_user_id;
+            $org_result = null; // Initialize to prevent undefined variable errors
+            $is_existing_user = $user_exists && !empty($found_org_id);
+
+            if ($is_existing_user) {
+                $logger->debug('Manual entry: SUCCESS - Existing user found, will NOT create new organization', array(
+                    'email' => $user_email,
+                    'org_id' => $org_id,
+                    'user_id' => $user_id
+                ));
             }
 
             // Step 1: Create organization (only if user doesn't exist)
@@ -1791,9 +1832,9 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 $logger->debug('========== MANUAL ENTRY: USER NOT FOUND - CREATING NEW ORG ==========');
                 $logger->debug('Manual entry: User was NOT found by email lookup. Proceeding to create new organization.', array(
                     'email' => $user_email,
-                    'reason' => !$existing_user['success'] ? 'API returned success=false' : 'API returned empty data or no orgId',
-                    'api_success' => $existing_user['success'] ?? false,
-                    'api_error' => $existing_user['error'] ?? 'none'
+                    'user_exists_flag' => $user_exists,
+                    'api_error' => $existing_user['error'] ?? 'none',
+                    'status_code' => $existing_user['status_code'] ?? 'unknown'
                 ));
                 $org_result = $monarch_api->create_organization($customer_data);
 
@@ -2123,6 +2164,38 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             // If single object returned
             if (isset($body['orgId']) || isset($body['_id'])) {
                 return $body;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Recursively search for orgId in a nested array/response
+     * This handles cases where Monarch returns orgId in unexpected locations
+     */
+    private function find_org_id_recursive($data, $depth = 0) {
+        // Prevent infinite recursion
+        if ($depth > 5 || !is_array($data)) {
+            return null;
+        }
+
+        // Direct keys to check
+        $org_id_keys = array('orgId', 'org_id', 'organizationId', 'organization_id');
+
+        foreach ($org_id_keys as $key) {
+            if (isset($data[$key]) && !empty($data[$key]) && is_string($data[$key])) {
+                return $data[$key];
+            }
+        }
+
+        // Recursively check nested arrays
+        foreach ($data as $key => $value) {
+            if (is_array($value)) {
+                $found = $this->find_org_id_recursive($value, $depth + 1);
+                if ($found) {
+                    return $found;
+                }
             }
         }
 

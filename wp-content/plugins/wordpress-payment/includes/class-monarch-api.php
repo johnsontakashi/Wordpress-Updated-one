@@ -145,6 +145,12 @@ class Monarch_API {
      * Get user by email
      * Check if an organization already exists for this email
      * Per Monarch documentation: GET /v1/getUserByEmail/{userEmail}
+     *
+     * IMPORTANT: This method handles the response specially because:
+     * - 404 = user not found (expected for new users)
+     * - 200 = user found with data
+     * - Other codes might still contain user data in the response body
+     *
      * @param string $email The user's email address
      * @return array Response with success status and user/org data if exists
      */
@@ -157,7 +163,127 @@ class Monarch_API {
             'full_url' => $url
         ));
 
-        return $this->make_request('GET', $url);
+        // Make the request directly to capture ALL response data
+        $headers = array(
+            'accept' => 'application/json',
+            'X-API-KEY' => $this->api_key,
+            'X-APP-ID' => $this->app_id,
+            'Content-Type' => 'application/json'
+        );
+
+        $response = wp_remote_get($url, array(
+            'headers' => $headers,
+            'timeout' => 30,
+            'sslverify' => true
+        ));
+
+        if (is_wp_error($response)) {
+            $logger->debug('get_user_by_email WP Error', array(
+                'error' => $response->get_error_message()
+            ));
+            return array(
+                'success' => false,
+                'error' => $response->get_error_message(),
+                'user_exists' => false
+            );
+        }
+
+        $status_code = wp_remote_retrieve_response_code($response);
+        $body = wp_remote_retrieve_body($response);
+        $decoded_body = json_decode($body, true);
+
+        $logger->debug('get_user_by_email RAW RESPONSE', array(
+            'status_code' => $status_code,
+            'raw_body' => $body,
+            'decoded_body' => $decoded_body,
+            'decoded_type' => gettype($decoded_body)
+        ));
+
+        // 404 = User definitely does not exist
+        if ($status_code === 404) {
+            $logger->debug('get_user_by_email: 404 - User does NOT exist', array('email' => $email));
+            return array(
+                'success' => false,
+                'error' => 'User not found',
+                'user_exists' => false,
+                'status_code' => 404
+            );
+        }
+
+        // 200 = User found
+        if ($status_code >= 200 && $status_code < 300) {
+            $logger->debug('get_user_by_email: 200 - User EXISTS', array(
+                'email' => $email,
+                'data' => $decoded_body
+            ));
+            return array(
+                'success' => true,
+                'data' => $decoded_body,
+                'user_exists' => true,
+                'status_code' => $status_code
+            );
+        }
+
+        // For ANY other status code, check if response contains user/org data
+        // Some APIs return user data even with error status codes
+        $found_org_id = $this->extract_org_id_from_response($decoded_body);
+
+        if ($found_org_id) {
+            $logger->debug('get_user_by_email: Found orgId in non-200 response - User EXISTS', array(
+                'email' => $email,
+                'status_code' => $status_code,
+                'found_org_id' => $found_org_id
+            ));
+            return array(
+                'success' => true,
+                'data' => $decoded_body,
+                'user_exists' => true,
+                'status_code' => $status_code,
+                'org_id' => $found_org_id
+            );
+        }
+
+        // No user data found
+        $logger->debug('get_user_by_email: No user data found', array(
+            'email' => $email,
+            'status_code' => $status_code
+        ));
+        return array(
+            'success' => false,
+            'error' => 'User lookup failed',
+            'user_exists' => false,
+            'status_code' => $status_code,
+            'response' => $decoded_body
+        );
+    }
+
+    /**
+     * Extract org_id from any response structure
+     */
+    private function extract_org_id_from_response($data, $depth = 0) {
+        if ($depth > 5 || !is_array($data)) {
+            return null;
+        }
+
+        // Check direct keys
+        $org_keys = array('orgId', 'org_id', 'organizationId', 'organization_id');
+        foreach ($org_keys as $key) {
+            if (isset($data[$key]) && !empty($data[$key])) {
+                return $data[$key];
+            }
+        }
+
+        // Check nested arrays
+        foreach ($data as $value) {
+            if (is_array($value)) {
+                $found = $this->extract_org_id_from_response($value, $depth + 1);
+                if ($found) {
+                    return $found;
+                }
+            }
+        }
+
+        return null;
     }
 
     /**

@@ -1,6 +1,6 @@
 # Monarch WooCommerce Payment Gateway - Developer Guide
 
-**Version:** 1.0.11
+**Version:** 1.0.13
 **Requires WordPress:** 5.0+
 **Requires WooCommerce:** 5.0+
 **Tested up to:** WordPress 6.4, WooCommerce 8.0
@@ -308,6 +308,28 @@ For plugin-specific issues, check the logs and transaction details in the WordPr
 ---
 
 ## Changelog
+
+### Version 1.0.13
+- **CRITICAL FIX: Rewrote `/getUserByEmail` API handling completely**
+- API method now makes direct HTTP request instead of using generic `make_request()`
+- Returns explicit `user_exists` flag (true/false) for unambiguous detection
+- Handles ALL HTTP status codes properly:
+  - 404 = User does NOT exist (proceed to create)
+  - 200 = User EXISTS (use existing org_id)
+  - Other codes = Check response body for orgId
+- Added `extract_org_id_from_response()` helper in API class
+- Logs RAW HTTP response body for debugging
+- Gateway code simplified to use `user_exists` flag
+
+### Version 1.0.12
+- **FIXED: "Email address already in use" error** - Completely rewrote org_id extraction logic
+- Now searches for orgId in ALL possible response locations using 3 methods:
+  - Method 1: Check standard `data` array with multiple key names (orgId, org_id, organizationId)
+  - Method 2: Check `response` array including nested `user` and `organization` objects
+  - Method 3: Deep recursive search through entire API response
+- Added `find_org_id_recursive()` helper function for thorough orgId discovery
+- Both instant verification and manual entry flows now use identical extraction logic
+- WooCommerce detection now supports WordPress Multisite installations
 
 ### Version 1.0.11
 - Added comprehensive debug logging for `/getUserByEmail` API response
