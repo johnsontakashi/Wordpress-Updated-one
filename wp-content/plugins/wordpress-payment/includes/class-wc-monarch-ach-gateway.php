@@ -848,8 +848,33 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             );
 
             // STEP 0: Check if user already exists by email (prevents "email already exists" error)
+            $logger->debug('========== EMAIL LOOKUP START ==========');
             $logger->debug('Checking if user already exists by email', array('email' => $user_email));
             $existing_user = $monarch_api->get_user_by_email($user_email);
+
+            // Log the COMPLETE response from getUserByEmail for debugging
+            $logger->debug('getUserByEmail FULL RESPONSE', array(
+                'email_checked' => $user_email,
+                'success' => $existing_user['success'] ?? 'NOT SET',
+                'data' => $existing_user['data'] ?? 'NOT SET',
+                'error' => $existing_user['error'] ?? 'NOT SET',
+                'status_code' => $existing_user['status_code'] ?? 'NOT SET',
+                'full_response' => $existing_user
+            ));
+
+            // Check various possible response structures
+            $has_data = !empty($existing_user['data']);
+            $is_array_data = is_array($existing_user['data'] ?? null);
+            $data_count = $is_array_data ? count($existing_user['data']) : 0;
+
+            $logger->debug('Response analysis', array(
+                'success_value' => $existing_user['success'],
+                'has_data' => $has_data,
+                'is_array_data' => $is_array_data,
+                'data_count' => $data_count,
+                'data_type' => gettype($existing_user['data'] ?? null)
+            ));
+            $logger->debug('========== EMAIL LOOKUP END ==========');
 
             if ($existing_user['success'] && !empty($existing_user['data'])) {
                 // User already exists - use existing org_id instead of creating new one
@@ -953,7 +978,13 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             }
 
             // STEP 1: Create organization (only if user doesn't exist)
-            $logger->debug('Creating new organization', array('email' => $user_email));
+            $logger->debug('========== USER NOT FOUND - CREATING NEW ORG ==========');
+            $logger->debug('User was NOT found by email lookup. Proceeding to create new organization.', array(
+                'email' => $user_email,
+                'reason' => !$existing_user['success'] ? 'API returned success=false' : 'API returned empty data',
+                'api_success' => $existing_user['success'] ?? false,
+                'api_error' => $existing_user['error'] ?? 'none'
+            ));
             $org_result = $monarch_api->create_organization($customer_data);
 
             if (!$org_result['success']) {
@@ -1710,8 +1741,33 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             );
 
             // STEP 0: Check if user already exists by email (prevents "email already exists" error)
+            $logger->debug('========== MANUAL ENTRY: EMAIL LOOKUP START ==========');
             $logger->debug('Manual entry: Checking if user already exists by email', array('email' => $user_email));
             $existing_user = $monarch_api->get_user_by_email($user_email);
+
+            // Log the COMPLETE response from getUserByEmail for debugging
+            $logger->debug('Manual entry: getUserByEmail FULL RESPONSE', array(
+                'email_checked' => $user_email,
+                'success' => $existing_user['success'] ?? 'NOT SET',
+                'data' => $existing_user['data'] ?? 'NOT SET',
+                'error' => $existing_user['error'] ?? 'NOT SET',
+                'status_code' => $existing_user['status_code'] ?? 'NOT SET',
+                'full_response' => $existing_user
+            ));
+
+            // Check various possible response structures
+            $has_data = !empty($existing_user['data']);
+            $is_array_data = is_array($existing_user['data'] ?? null);
+            $data_count = $is_array_data ? count($existing_user['data']) : 0;
+
+            $logger->debug('Manual entry: Response analysis', array(
+                'success_value' => $existing_user['success'],
+                'has_data' => $has_data,
+                'is_array_data' => $is_array_data,
+                'data_count' => $data_count,
+                'data_type' => gettype($existing_user['data'] ?? null)
+            ));
+            $logger->debug('========== MANUAL ENTRY: EMAIL LOOKUP END ==========');
 
             $org_id = null;
             $user_id = null;
@@ -1732,7 +1788,13 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
 
             // Step 1: Create organization (only if user doesn't exist)
             if (!$org_id) {
-                $logger->debug('Manual entry: Creating new organization', array('email' => $user_email));
+                $logger->debug('========== MANUAL ENTRY: USER NOT FOUND - CREATING NEW ORG ==========');
+                $logger->debug('Manual entry: User was NOT found by email lookup. Proceeding to create new organization.', array(
+                    'email' => $user_email,
+                    'reason' => !$existing_user['success'] ? 'API returned success=false' : 'API returned empty data or no orgId',
+                    'api_success' => $existing_user['success'] ?? false,
+                    'api_error' => $existing_user['error'] ?? 'none'
+                ));
                 $org_result = $monarch_api->create_organization($customer_data);
 
                 if (!$org_result['success']) {

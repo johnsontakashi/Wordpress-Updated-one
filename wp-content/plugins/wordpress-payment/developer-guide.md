@@ -1,6 +1,6 @@
 # Monarch WooCommerce Payment Gateway - Developer Guide
 
-**Version:** 1.0.10
+**Version:** 1.0.11
 **Requires WordPress:** 5.0+
 **Requires WooCommerce:** 5.0+
 **Tested up to:** WordPress 6.4, WooCommerce 8.0
@@ -308,6 +308,14 @@ For plugin-specific issues, check the logs and transaction details in the WordPr
 ---
 
 ## Changelog
+
+### Version 1.0.11
+- Added comprehensive debug logging for `/getUserByEmail` API response
+- Logs full API response structure, success/error status, and data type analysis
+- Added clear "EMAIL LOOKUP START/END" markers in logs for easier debugging
+- Logs exactly why user was/wasn't found (success=false vs empty data)
+- Helps diagnose why "email already exists" error might still occur
+- Same logging added to both instant verification and manual entry flows
 
 ### Version 1.0.10
 - Fixed ALL customer data fields to use real-time form input
