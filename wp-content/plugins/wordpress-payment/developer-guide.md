@@ -1,6 +1,6 @@
 # Monarch WooCommerce Payment Gateway - Developer Guide
 
-**Version:** 1.0.9
+**Version:** 1.0.10
 **Requires WordPress:** 5.0+
 **Requires WooCommerce:** 5.0+
 **Tested up to:** WordPress 6.4, WooCommerce 8.0
@@ -308,6 +308,12 @@ For plugin-specific issues, check the logs and transaction details in the WordPr
 ---
 
 ## Changelog
+
+### Version 1.0.10
+- Fixed ALL customer data fields to use real-time form input
+- First name, last name, and email now prioritize form data over WordPress user meta
+- Completely eliminates cached data issues for logged-in users
+- Added comprehensive debug logging for all customer data fields
 
 ### Version 1.0.9
 - Fixed email caching issue - now uses real-time billing email from form

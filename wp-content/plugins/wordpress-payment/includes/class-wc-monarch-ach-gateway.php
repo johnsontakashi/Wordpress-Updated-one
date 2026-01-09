@@ -797,14 +797,34 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 $user_id = $current_user->ID;
             }
 
-            $logger->debug('Email being used for organization', array(
+            // IMPORTANT: Always prioritize form data (real-time input) over cached WordPress user data
+            // Get form values first
+            $form_first_name = isset($_POST['billing_first_name']) ? sanitize_text_field($_POST['billing_first_name']) : '';
+            $form_last_name = isset($_POST['billing_last_name']) ? sanitize_text_field($_POST['billing_last_name']) : '';
+
+            // Use form data if provided, otherwise fall back to WordPress user data
+            if ($is_guest) {
+                $first_name = $form_first_name;
+                $last_name = $form_last_name;
+            } else {
+                $first_name = !empty($form_first_name) ? $form_first_name : $current_user->user_firstname;
+                $last_name = !empty($form_last_name) ? $form_last_name : $current_user->user_lastname;
+            }
+
+            $logger->debug('Customer data being used for organization', array(
                 'form_email' => $form_email,
+                'form_first_name' => $form_first_name,
+                'form_last_name' => $form_last_name,
                 'wp_user_email' => $is_guest ? 'N/A (guest)' : $current_user->user_email,
+                'wp_first_name' => $is_guest ? 'N/A (guest)' : $current_user->user_firstname,
+                'wp_last_name' => $is_guest ? 'N/A (guest)' : $current_user->user_lastname,
                 'final_email' => $user_email,
+                'final_first_name' => $first_name,
+                'final_last_name' => $last_name,
                 'is_guest' => $is_guest
             ));
-            
-            // Prepare customer data
+
+            // Prepare customer data - ALL fields use form data (real-time input)
             $phone = preg_replace('/[^0-9]/', '', sanitize_text_field($_POST['monarch_phone']));
             $phone = substr($phone, -10); // Last 10 digits
 
@@ -812,8 +832,8 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             $dob = date('m/d/Y', strtotime($dob_raw)); // Convert to mm/dd/yyyy
 
             $customer_data = array(
-                'first_name' => $is_guest ? sanitize_text_field($_POST['billing_first_name']) : ($current_user->user_firstname ?: sanitize_text_field($_POST['billing_first_name'])),
-                'last_name' => $is_guest ? sanitize_text_field($_POST['billing_last_name']) : ($current_user->user_lastname ?: sanitize_text_field($_POST['billing_last_name'])),
+                'first_name' => $first_name,
+                'last_name' => $last_name,
                 'email' => $user_email,
                 'password' => wp_generate_password(16, true, true),
                 'phone' => $phone,
@@ -1639,7 +1659,34 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 wp_send_json_error('Routing number must be exactly 9 digits');
             }
 
-            // Prepare customer data
+            // IMPORTANT: Always prioritize form data (real-time input) over cached WordPress user data
+            // Get form values first
+            $form_first_name = isset($_POST['billing_first_name']) ? sanitize_text_field($_POST['billing_first_name']) : '';
+            $form_last_name = isset($_POST['billing_last_name']) ? sanitize_text_field($_POST['billing_last_name']) : '';
+
+            // Use form data if provided, otherwise fall back to WordPress user data
+            if ($is_guest) {
+                $first_name = $form_first_name;
+                $last_name = $form_last_name;
+            } else {
+                $first_name = !empty($form_first_name) ? $form_first_name : $current_user->user_firstname;
+                $last_name = !empty($form_last_name) ? $form_last_name : $current_user->user_lastname;
+            }
+
+            $logger->debug('Manual entry: Customer data being used for organization', array(
+                'form_email' => $form_email,
+                'form_first_name' => $form_first_name,
+                'form_last_name' => $form_last_name,
+                'wp_user_email' => $is_guest ? 'N/A (guest)' : $current_user->user_email,
+                'wp_first_name' => $is_guest ? 'N/A (guest)' : $current_user->user_firstname,
+                'wp_last_name' => $is_guest ? 'N/A (guest)' : $current_user->user_lastname,
+                'final_email' => $user_email,
+                'final_first_name' => $first_name,
+                'final_last_name' => $last_name,
+                'is_guest' => $is_guest
+            ));
+
+            // Prepare customer data - ALL fields use form data (real-time input)
             $phone = preg_replace('/[^0-9]/', '', sanitize_text_field($_POST['monarch_phone']));
             $phone = substr($phone, -10);
 
@@ -1647,8 +1694,8 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             $dob = date('m/d/Y', strtotime($dob_raw));
 
             $customer_data = array(
-                'first_name' => $is_guest ? sanitize_text_field($_POST['billing_first_name']) : ($current_user->user_firstname ?: sanitize_text_field($_POST['billing_first_name'])),
-                'last_name' => $is_guest ? sanitize_text_field($_POST['billing_last_name']) : ($current_user->user_lastname ?: sanitize_text_field($_POST['billing_last_name'])),
+                'first_name' => $first_name,
+                'last_name' => $last_name,
                 'email' => $user_email,
                 'password' => wp_generate_password(16, true, true),
                 'phone' => $phone,
