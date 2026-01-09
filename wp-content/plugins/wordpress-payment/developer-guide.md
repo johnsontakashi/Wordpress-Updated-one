@@ -1,6 +1,6 @@
 # Monarch WooCommerce Payment Gateway - Developer Guide
 
-**Version:** 1.0.8
+**Version:** 1.0.9
 **Requires WordPress:** 5.0+
 **Requires WooCommerce:** 5.0+
 **Tested up to:** WordPress 6.4, WooCommerce 8.0
@@ -308,6 +308,12 @@ For plugin-specific issues, check the logs and transaction details in the WordPr
 ---
 
 ## Changelog
+
+### Version 1.0.9
+- Fixed email caching issue - now uses real-time billing email from form
+- For logged-in users, form email takes priority over WordPress account email
+- Added debug logging to track email source (form vs WordPress user)
+- Prevents "email already exists" error caused by cached/old email addresses
 
 ### Version 1.0.8
 - Added email lookup before organization creation (prevents "email already exists" error)

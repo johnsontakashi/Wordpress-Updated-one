@@ -783,15 +783,26 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             );
             
             // Get user data - support both logged in users and guest checkout
+            // IMPORTANT: Always use billing_email from form (real-time input), NOT cached WordPress user email
+            $form_email = isset($_POST['billing_email']) ? sanitize_email($_POST['billing_email']) : '';
+
             if ($is_guest) {
                 // For guest checkout, use billing email from form
-                $user_email = sanitize_email($_POST['billing_email']);
+                $user_email = $form_email;
                 $user_id = 'guest_' . substr(md5($user_email . time()), 0, 8);
             } else {
                 $current_user = wp_get_current_user();
-                $user_email = $current_user->user_email;
+                // Use form email if provided, otherwise fall back to WordPress user email
+                $user_email = !empty($form_email) ? $form_email : $current_user->user_email;
                 $user_id = $current_user->ID;
             }
+
+            $logger->debug('Email being used for organization', array(
+                'form_email' => $form_email,
+                'wp_user_email' => $is_guest ? 'N/A (guest)' : $current_user->user_email,
+                'final_email' => $user_email,
+                'is_guest' => $is_guest
+            ));
             
             // Prepare customer data
             $phone = preg_replace('/[^0-9]/', '', sanitize_text_field($_POST['monarch_phone']));
@@ -1588,17 +1599,30 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             );
 
             // Get user data - support both logged in users and guest checkout
+            // IMPORTANT: Always use billing_email from form (real-time input), NOT cached WordPress user email
+            $form_email = isset($_POST['billing_email']) ? sanitize_email($_POST['billing_email']) : '';
+
+            $logger = WC_Monarch_Logger::instance();
+
             if ($is_guest) {
                 // For guest checkout, use billing email from form
-                $user_email = sanitize_email($_POST['billing_email']);
+                $user_email = $form_email;
                 $user_id = 'guest_' . substr(md5($user_email . time()), 0, 8);
                 $customer_id = null; // No WordPress user ID for guests
             } else {
                 $current_user = wp_get_current_user();
                 $customer_id = get_current_user_id();
-                $user_email = $current_user->user_email;
+                // Use form email if provided, otherwise fall back to WordPress user email
+                $user_email = !empty($form_email) ? $form_email : $current_user->user_email;
                 $user_id = $customer_id;
             }
+
+            $logger->debug('Manual entry: Email being used for organization', array(
+                'form_email' => $form_email,
+                'wp_user_email' => $is_guest ? 'N/A (guest)' : $current_user->user_email,
+                'final_email' => $user_email,
+                'is_guest' => $is_guest
+            ));
 
             // Validate required fields
             $bank_name = sanitize_text_field($_POST['bank_name']);
@@ -1637,8 +1661,6 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 'zip' => sanitize_text_field($_POST['billing_postcode']),
                 'country' => sanitize_text_field($_POST['billing_country'])
             );
-
-            $logger = WC_Monarch_Logger::instance();
 
             // STEP 0: Check if user already exists by email (prevents "email already exists" error)
             $logger->debug('Manual entry: Checking if user already exists by email', array('email' => $user_email));
