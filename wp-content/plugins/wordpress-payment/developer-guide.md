@@ -1,6 +1,6 @@
 # Monarch WooCommerce Payment Gateway - Developer Guide
 
-**Version:** 1.0.14
+**Version:** 1.0.16
 **Requires WordPress:** 5.0+
 **Requires WooCommerce:** 5.0+
 **Tested up to:** WordPress 6.4, WooCommerce 8.0
@@ -308,6 +308,26 @@ For plugin-specific issues, check the logs and transaction details in the WordPr
 ---
 
 ## Changelog
+
+### Version 1.0.16
+- **MULTI-ENDPOINT LOOKUP: Tries multiple APIs to find existing users**
+- `get_user_by_email()` now tries BOTH endpoints in sequence:
+  1. `/merchants/verify/{email}` - For merchants (per Monarch support)
+  2. `/getUserByEmail/{email}` - Fallback for purchasers
+- `find_organization_by_email()` now tries THREE endpoints:
+  1. `/merchants/verify/{email}`
+  2. `/getUserByEmail/{email}`
+  3. `/organization?email={email}`
+- Comprehensive logging for each endpoint attempt
+- Should now work for both merchants AND purchasers
+
+### Version 1.0.15
+- **CRITICAL FIX: Changed email lookup endpoint per Monarch support**
+- Now uses `/merchants/verify/{email}` instead of `/getUserByEmail/{email}`
+- Monarch confirmed this endpoint works for looking up existing users
+- Response includes `orgId` directly in the response body
+- Logs org_type and role_name for debugging
+- This should finally fix the "Email already in use" error for returning customers
 
 ### Version 1.0.14
 - **FALLBACK FIX: Catch "Email already in use" error and recover**

@@ -2254,7 +2254,67 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             ? 'https://devapi.monarch.is/v1'
             : 'https://api.monarch.is/v1';
 
-        // Search for organization by email
+        $logger = WC_Monarch_Logger::instance();
+        $logger->debug('find_organization_by_email called', array('email' => $email));
+
+        // Method 1: Try /merchants/verify/{email} endpoint
+        $verify_response = wp_remote_get($api_url . '/merchants/verify/' . urlencode($email), array(
+            'headers' => array(
+                'accept' => 'application/json',
+                'X-API-KEY' => $this->api_key,
+                'X-APP-ID' => $this->app_id
+            ),
+            'timeout' => 30
+        ));
+
+        if (!is_wp_error($verify_response)) {
+            $status_code = wp_remote_retrieve_response_code($verify_response);
+            $body = json_decode(wp_remote_retrieve_body($verify_response), true);
+
+            $logger->debug('find_organization_by_email: /merchants/verify response', array(
+                'status_code' => $status_code,
+                'body' => $body
+            ));
+
+            if ($status_code >= 200 && $status_code < 300 && !empty($body) && isset($body['orgId'])) {
+                $logger->debug('find_organization_by_email: Found via /merchants/verify', array(
+                    'orgId' => $body['orgId']
+                ));
+                return $body;
+            }
+        }
+
+        // Method 2: Try /getUserByEmail/{email} endpoint (original endpoint)
+        $user_response = wp_remote_get($api_url . '/getUserByEmail/' . urlencode($email), array(
+            'headers' => array(
+                'accept' => 'application/json',
+                'X-API-KEY' => $this->api_key,
+                'X-APP-ID' => $this->app_id
+            ),
+            'timeout' => 30
+        ));
+
+        if (!is_wp_error($user_response)) {
+            $status_code = wp_remote_retrieve_response_code($user_response);
+            $body = json_decode(wp_remote_retrieve_body($user_response), true);
+
+            $logger->debug('find_organization_by_email: /getUserByEmail response', array(
+                'status_code' => $status_code,
+                'body' => $body
+            ));
+
+            if ($status_code >= 200 && $status_code < 300 && !empty($body)) {
+                $org_id = $body['orgId'] ?? $body['org_id'] ?? null;
+                if ($org_id) {
+                    $logger->debug('find_organization_by_email: Found via /getUserByEmail', array(
+                        'orgId' => $org_id
+                    ));
+                    return $body;
+                }
+            }
+        }
+
+        // Method 3: Try /organization?email={email} endpoint
         $response = wp_remote_get($api_url . '/organization?email=' . urlencode($email), array(
             'headers' => array(
                 'accept' => 'application/json',
@@ -2264,24 +2324,34 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             'timeout' => 30
         ));
 
-        if (is_wp_error($response)) {
-            return null;
+        if (!is_wp_error($response)) {
+            $status_code = wp_remote_retrieve_response_code($response);
+            $body = json_decode(wp_remote_retrieve_body($response), true);
+
+            $logger->debug('find_organization_by_email: /organization?email response', array(
+                'status_code' => $status_code,
+                'body' => $body
+            ));
+
+            if ($status_code >= 200 && $status_code < 300 && !empty($body)) {
+                // Return first matching organization
+                if (is_array($body) && isset($body[0])) {
+                    $logger->debug('find_organization_by_email: Found via /organization (array)', array(
+                        'orgId' => $body[0]['orgId'] ?? 'unknown'
+                    ));
+                    return $body[0];
+                }
+                // If single object returned
+                if (isset($body['orgId']) || isset($body['_id'])) {
+                    $logger->debug('find_organization_by_email: Found via /organization (object)', array(
+                        'orgId' => $body['orgId'] ?? $body['_id'] ?? 'unknown'
+                    ));
+                    return $body;
+                }
+            }
         }
 
-        $status_code = wp_remote_retrieve_response_code($response);
-        $body = json_decode(wp_remote_retrieve_body($response), true);
-
-        if ($status_code >= 200 && $status_code < 300 && !empty($body)) {
-            // Return first matching organization
-            if (is_array($body) && isset($body[0])) {
-                return $body[0];
-            }
-            // If single object returned
-            if (isset($body['orgId']) || isset($body['_id'])) {
-                return $body;
-            }
-        }
-
+        $logger->debug('find_organization_by_email: No organization found by any method', array('email' => $email));
         return null;
     }
 
