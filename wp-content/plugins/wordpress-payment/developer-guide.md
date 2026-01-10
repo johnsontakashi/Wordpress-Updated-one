@@ -1,6 +1,6 @@
 # Monarch WooCommerce Payment Gateway - Developer Guide
 
-**Version:** 1.0.18
+**Version:** 1.0.21
 **Requires WordPress:** 5.0+
 **Requires WooCommerce:** 5.0+
 **Tested up to:** WordPress 6.4, WooCommerce 8.0
@@ -308,6 +308,37 @@ For plugin-specific issues, check the logs and transaction details in the WordPr
 ---
 
 ## Changelog
+
+### Version 1.0.21
+- **EXPANDED: Now tries 10 API endpoints to find/regenerate bank linking URL**
+- Added 3 new methods for refreshing/regenerating embedded URLs:
+  8. `PUT /organization/{org_id}` with refreshEmbedded flag
+  9. `POST /partner/embedded/refresh` with orgId
+  10. `POST /organization/refresh/{org_id}` with partnerName
+- The key insight: for existing users, we may need to REGENERATE the URL, not just fetch it
+- All 10 endpoints are logged for debugging - check Logs tab to see which ones work
+
+### Version 1.0.20
+- **EXPANDED: Added 7 API endpoints to find bank linking URL**
+- Now tries these endpoints in order:
+  1. `GET /partner/embedded/{org_id}`
+  2. `GET /organization/{org_id}`
+  3. `GET /organization/embedded/{org_id}`
+  4. `POST /partner/embedded` with orgId
+  5. `POST /organization/embedded` with orgId, partnerName, merchantOrgId
+  6. `GET /embedded/{org_id}`
+  7. `POST /embedded` with orgId
+- Checks 10 different URL field names in each response
+- Added comprehensive logging for all 7 endpoint attempts
+- **You may need to ask Monarch support which endpoint returns the bank linking URL for existing users**
+
+### Version 1.0.19
+- **FIX: "Unable to retrieve bank linking URL" error for returning users**
+- `ajax_get_bank_linking_url()` now uses the comprehensive `get_bank_linking_url_for_org()` helper
+- Helper now tries 4 different API endpoints with 10 possible URL field names
+- Updated helper to accept optional API credentials for purchaser-specific auth
+- Passes correct credentials (purchaser if available, otherwise merchant) to the helper
+- Comprehensive logging for each endpoint attempt to help diagnose issues
 
 ### Version 1.0.18
 - **CRITICAL FIX: Fixed 404 error for returning users**
