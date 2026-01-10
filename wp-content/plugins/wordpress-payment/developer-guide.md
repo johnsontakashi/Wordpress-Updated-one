@@ -1,6 +1,6 @@
 # Monarch WooCommerce Payment Gateway - Developer Guide
 
-**Version:** 1.0.16
+**Version:** 1.0.18
 **Requires WordPress:** 5.0+
 **Requires WooCommerce:** 5.0+
 **Tested up to:** WordPress 6.4, WooCommerce 8.0
@@ -308,6 +308,26 @@ For plugin-specific issues, check the logs and transaction details in the WordPr
 ---
 
 ## Changelog
+
+### Version 1.0.18
+- **CRITICAL FIX: Fixed 404 error for returning users**
+- Added missing AJAX handler registration for `monarch_get_bank_linking_url` in main plugin file
+- AJAX handlers in gateway class constructor were not being loaded for nopriv (guest) AJAX calls
+- Moved handler registration to `register_ajax_handlers()` method which runs on `init` hook
+- Added wrapper method `ajax_get_bank_linking_url()` in plugin class to delegate to gateway
+- This fixes the "Connection error" with 404 status that occurred when returning users clicked "Continue with Bank"
+
+### Version 1.0.17
+- **IMPROVED BANK LINKING URL RETRIEVAL**
+- Added `get_bank_linking_url_for_org()` helper method that tries 4 endpoints:
+  1. `GET /partner/embedded/{org_id}`
+  2. `GET /organization/{org_id}`
+  3. `GET /organization/embedded/{org_id}`
+  4. `POST /partner/embedded` with org_id in body
+- Checks 10 different possible URL field names in API responses
+- Comprehensive logging for each endpoint attempt
+- Reused helper in both main flow and fallback flow
+- Should fix "Unable to retrieve bank linking URL" error
 
 ### Version 1.0.16
 - **MULTI-ENDPOINT LOOKUP: Tries multiple APIs to find existing users**

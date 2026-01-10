@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Monarch WooCommerce Payment Gateway
  * Description: Monarch Payment Gateway.
- * Version: 1.0.16
+ * Version: 1.0.18
  * Author: Monarch Technologies Inc.
  * License: GPL v2 or later
  * Requires at least: 5.0
@@ -31,7 +31,7 @@ if (!in_array('woocommerce/woocommerce.php', $active_plugins) && !class_exists('
     return;
 }
 
-define('WC_MONARCH_ACH_VERSION', '1.0.16');
+define('WC_MONARCH_ACH_VERSION', '1.0.18');
 define('WC_MONARCH_ACH_PLUGIN_PATH', plugin_dir_path(__FILE__));
 define('WC_MONARCH_ACH_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -358,6 +358,9 @@ class WC_Monarch_ACH_Gateway_Plugin {
         add_action('wp_ajax_nopriv_monarch_get_latest_paytoken', array($this, 'ajax_get_latest_paytoken'));
         add_action('wp_ajax_monarch_manual_bank_entry', array($this, 'ajax_manual_bank_entry'));
         add_action('wp_ajax_nopriv_monarch_manual_bank_entry', array($this, 'ajax_manual_bank_entry'));
+        // Bank linking URL for returning users
+        add_action('wp_ajax_monarch_get_bank_linking_url', array($this, 'ajax_get_bank_linking_url'));
+        add_action('wp_ajax_nopriv_monarch_get_bank_linking_url', array($this, 'ajax_get_bank_linking_url'));
         // CRON manual status update handler
         add_action('wp_ajax_monarch_manual_status_update', array($this, 'ajax_manual_status_update'));
         // Bank callback handler - outputs the success page when redirected from Monarch/Yodlee
@@ -622,6 +625,14 @@ class WC_Monarch_ACH_Gateway_Plugin {
     public function ajax_manual_bank_entry() {
         $gateway = $this->get_gateway();
         $gateway->ajax_manual_bank_entry();
+    }
+
+    /**
+     * AJAX handler for getting bank linking URL for returning users
+     */
+    public function ajax_get_bank_linking_url() {
+        $gateway = $this->get_gateway();
+        $gateway->ajax_get_bank_linking_url();
     }
 
     /**

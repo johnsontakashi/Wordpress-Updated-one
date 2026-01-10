@@ -912,56 +912,7 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 $user_id = $found_user_id;
 
                 // Get bank linking URL for existing organization
-                $api_url = $this->testmode ? 'https://devapi.monarch.is/v1' : 'https://api.monarch.is/v1';
-                $bank_linking_url = '';
-
-                // First try: /partner/embedded/{org_id}
-                $embed_response = wp_remote_get($api_url . '/partner/embedded/' . $org_id, array(
-                    'headers' => array(
-                        'X-API-KEY' => $this->api_key,
-                        'X-APP-ID' => $this->app_id,
-                        'accept' => 'application/json'
-                    ),
-                    'timeout' => 30
-                ));
-
-                if (!is_wp_error($embed_response)) {
-                    $embed_body = json_decode(wp_remote_retrieve_body($embed_response), true);
-                    $bank_linking_url = $embed_body['partner_embedded_url'] ?? $embed_body['url'] ?? '';
-                    $logger->debug('Embed endpoint response', array(
-                        'status_code' => wp_remote_retrieve_response_code($embed_response),
-                        'body' => $embed_body
-                    ));
-                } else {
-                    $logger->debug('Embed endpoint error', array(
-                        'error' => $embed_response->get_error_message()
-                    ));
-                }
-
-                // Second try: /organization/{org_id}
-                if (empty($bank_linking_url)) {
-                    $org_response = wp_remote_get($api_url . '/organization/' . $org_id, array(
-                        'headers' => array(
-                            'X-API-KEY' => $this->api_key,
-                            'X-APP-ID' => $this->app_id,
-                            'accept' => 'application/json'
-                        ),
-                        'timeout' => 30
-                    ));
-
-                    if (!is_wp_error($org_response)) {
-                        $org_body = json_decode(wp_remote_retrieve_body($org_response), true);
-                        $bank_linking_url = $org_body['partner_embedded_url'] ?? $org_body['bankLinkingUrl'] ?? '';
-                        $logger->debug('Organization endpoint response', array(
-                            'status_code' => wp_remote_retrieve_response_code($org_response),
-                            'body' => $org_body
-                        ));
-                    } else {
-                        $logger->debug('Organization endpoint error', array(
-                            'error' => $org_response->get_error_message()
-                        ));
-                    }
-                }
+                $bank_linking_url = $this->get_bank_linking_url_for_org($org_id, $logger);
 
                 // If still no URL, return error instead of empty URL
                 if (empty($bank_linking_url)) {
@@ -1032,41 +983,8 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                             'user_id' => $user_id
                         ));
 
-                        // Get bank linking URL for this existing organization
-                        $api_url = $this->testmode ? 'https://devapi.monarch.is/v1' : 'https://api.monarch.is/v1';
-                        $bank_linking_url = '';
-
-                        // Try /partner/embedded/{org_id}
-                        $embed_response = wp_remote_get($api_url . '/partner/embedded/' . $org_id, array(
-                            'headers' => array(
-                                'X-API-KEY' => $this->api_key,
-                                'X-APP-ID' => $this->app_id,
-                                'accept' => 'application/json'
-                            ),
-                            'timeout' => 30
-                        ));
-
-                        if (!is_wp_error($embed_response)) {
-                            $embed_body = json_decode(wp_remote_retrieve_body($embed_response), true);
-                            $bank_linking_url = $embed_body['partner_embedded_url'] ?? $embed_body['url'] ?? '';
-                        }
-
-                        // Fallback to /organization/{org_id}
-                        if (empty($bank_linking_url)) {
-                            $org_response = wp_remote_get($api_url . '/organization/' . $org_id, array(
-                                'headers' => array(
-                                    'X-API-KEY' => $this->api_key,
-                                    'X-APP-ID' => $this->app_id,
-                                    'accept' => 'application/json'
-                                ),
-                                'timeout' => 30
-                            ));
-
-                            if (!is_wp_error($org_response)) {
-                                $org_body = json_decode(wp_remote_retrieve_body($org_response), true);
-                                $bank_linking_url = $org_body['partner_embedded_url'] ?? $org_body['bankLinkingUrl'] ?? '';
-                            }
-                        }
+                        // Get bank linking URL using the comprehensive helper method
+                        $bank_linking_url = $this->get_bank_linking_url_for_org($org_id, $logger);
 
                         if (!empty($bank_linking_url)) {
                             // Save and return existing org data
@@ -2385,5 +2303,173 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
         }
 
         return null;
+    }
+
+    /**
+     * Get bank linking URL for an existing organization
+     * Tries multiple endpoints to find the URL
+     *
+     * @param string $org_id The organization ID
+     * @param WC_Monarch_Logger $logger Logger instance
+     * @return string The bank linking URL or empty string if not found
+     */
+    private function get_bank_linking_url_for_org($org_id, $logger = null) {
+        if (!$logger) {
+            $logger = WC_Monarch_Logger::instance();
+        }
+
+        $api_url = $this->testmode ? 'https://devapi.monarch.is/v1' : 'https://api.monarch.is/v1';
+        $bank_linking_url = '';
+
+        $headers = array(
+            'X-API-KEY' => $this->api_key,
+            'X-APP-ID' => $this->app_id,
+            'accept' => 'application/json'
+        );
+
+        // List of possible URL field names in the response
+        $url_fields = array(
+            'partner_embedded_url',
+            'bankLinkingUrl',
+            'bank_linking_url',
+            'connectionUrl',
+            'connection_url',
+            'url',
+            'embedUrl',
+            'embed_url',
+            'yodleeUrl',
+            'plaidUrl'
+        );
+
+        $logger->debug('get_bank_linking_url_for_org: Starting URL lookup', array('org_id' => $org_id));
+
+        // Method 1: Try /partner/embedded/{org_id}
+        $embed_response = wp_remote_get($api_url . '/partner/embedded/' . $org_id, array(
+            'headers' => $headers,
+            'timeout' => 30
+        ));
+
+        if (!is_wp_error($embed_response)) {
+            $status_code = wp_remote_retrieve_response_code($embed_response);
+            $embed_body = json_decode(wp_remote_retrieve_body($embed_response), true);
+
+            $logger->debug('get_bank_linking_url_for_org: /partner/embedded response', array(
+                'status_code' => $status_code,
+                'body' => $embed_body
+            ));
+
+            if ($status_code >= 200 && $status_code < 300 && !empty($embed_body)) {
+                foreach ($url_fields as $field) {
+                    if (!empty($embed_body[$field])) {
+                        $bank_linking_url = $embed_body[$field];
+                        $logger->debug('get_bank_linking_url_for_org: Found URL via /partner/embedded', array(
+                            'field' => $field,
+                            'url' => $bank_linking_url
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Method 2: Try /organization/{org_id}
+        if (empty($bank_linking_url)) {
+            $org_response = wp_remote_get($api_url . '/organization/' . $org_id, array(
+                'headers' => $headers,
+                'timeout' => 30
+            ));
+
+            if (!is_wp_error($org_response)) {
+                $status_code = wp_remote_retrieve_response_code($org_response);
+                $org_body = json_decode(wp_remote_retrieve_body($org_response), true);
+
+                $logger->debug('get_bank_linking_url_for_org: /organization response', array(
+                    'status_code' => $status_code,
+                    'body' => $org_body
+                ));
+
+                if ($status_code >= 200 && $status_code < 300 && !empty($org_body)) {
+                    foreach ($url_fields as $field) {
+                        if (!empty($org_body[$field])) {
+                            $bank_linking_url = $org_body[$field];
+                            $logger->debug('get_bank_linking_url_for_org: Found URL via /organization', array(
+                                'field' => $field,
+                                'url' => $bank_linking_url
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Method 3: Try /organization/embedded/{org_id}
+        if (empty($bank_linking_url)) {
+            $org_embed_response = wp_remote_get($api_url . '/organization/embedded/' . $org_id, array(
+                'headers' => $headers,
+                'timeout' => 30
+            ));
+
+            if (!is_wp_error($org_embed_response)) {
+                $status_code = wp_remote_retrieve_response_code($org_embed_response);
+                $org_embed_body = json_decode(wp_remote_retrieve_body($org_embed_response), true);
+
+                $logger->debug('get_bank_linking_url_for_org: /organization/embedded response', array(
+                    'status_code' => $status_code,
+                    'body' => $org_embed_body
+                ));
+
+                if ($status_code >= 200 && $status_code < 300 && !empty($org_embed_body)) {
+                    foreach ($url_fields as $field) {
+                        if (!empty($org_embed_body[$field])) {
+                            $bank_linking_url = $org_embed_body[$field];
+                            $logger->debug('get_bank_linking_url_for_org: Found URL via /organization/embedded', array(
+                                'field' => $field,
+                                'url' => $bank_linking_url
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Method 4: Try POST /partner/embedded with org_id in body
+        if (empty($bank_linking_url)) {
+            $post_response = wp_remote_post($api_url . '/partner/embedded', array(
+                'headers' => array_merge($headers, array('Content-Type' => 'application/json')),
+                'body' => json_encode(array('orgId' => $org_id)),
+                'timeout' => 30
+            ));
+
+            if (!is_wp_error($post_response)) {
+                $status_code = wp_remote_retrieve_response_code($post_response);
+                $post_body = json_decode(wp_remote_retrieve_body($post_response), true);
+
+                $logger->debug('get_bank_linking_url_for_org: POST /partner/embedded response', array(
+                    'status_code' => $status_code,
+                    'body' => $post_body
+                ));
+
+                if ($status_code >= 200 && $status_code < 300 && !empty($post_body)) {
+                    foreach ($url_fields as $field) {
+                        if (!empty($post_body[$field])) {
+                            $bank_linking_url = $post_body[$field];
+                            $logger->debug('get_bank_linking_url_for_org: Found URL via POST /partner/embedded', array(
+                                'field' => $field,
+                                'url' => $bank_linking_url
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (empty($bank_linking_url)) {
+            $logger->error('get_bank_linking_url_for_org: No URL found by any method', array('org_id' => $org_id));
+        }
+
+        return $bank_linking_url;
     }
 }
