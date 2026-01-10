@@ -1010,6 +1010,91 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             $org_result = $monarch_api->create_organization($customer_data);
 
             if (!$org_result['success']) {
+                // Check if the error is "Email already in use" - if so, the user DOES exist
+                // This is a fallback in case /getUserByEmail didn't find them
+                $error_msg = strtolower($org_result['error'] ?? '');
+                if (strpos($error_msg, 'email') !== false && (strpos($error_msg, 'already') !== false || strpos($error_msg, 'exists') !== false || strpos($error_msg, 'in use') !== false)) {
+                    $logger->debug('========== FALLBACK: Email exists error caught ==========');
+                    $logger->debug('Organization creation failed with "email exists" error. Attempting to find existing org.', array(
+                        'email' => $user_email,
+                        'error' => $org_result['error']
+                    ));
+
+                    // Try to find the existing organization using alternative method
+                    $existing_org = $this->find_organization_by_email($user_email);
+
+                    if ($existing_org && !empty($existing_org['orgId'] ?? $existing_org['_id'] ?? null)) {
+                        $org_id = $existing_org['orgId'] ?? $existing_org['org_id'] ?? null;
+                        $user_id = $existing_org['_id'] ?? $existing_org['userId'] ?? null;
+
+                        $logger->debug('FALLBACK SUCCESS: Found existing organization', array(
+                            'org_id' => $org_id,
+                            'user_id' => $user_id
+                        ));
+
+                        // Get bank linking URL for this existing organization
+                        $api_url = $this->testmode ? 'https://devapi.monarch.is/v1' : 'https://api.monarch.is/v1';
+                        $bank_linking_url = '';
+
+                        // Try /partner/embedded/{org_id}
+                        $embed_response = wp_remote_get($api_url . '/partner/embedded/' . $org_id, array(
+                            'headers' => array(
+                                'X-API-KEY' => $this->api_key,
+                                'X-APP-ID' => $this->app_id,
+                                'accept' => 'application/json'
+                            ),
+                            'timeout' => 30
+                        ));
+
+                        if (!is_wp_error($embed_response)) {
+                            $embed_body = json_decode(wp_remote_retrieve_body($embed_response), true);
+                            $bank_linking_url = $embed_body['partner_embedded_url'] ?? $embed_body['url'] ?? '';
+                        }
+
+                        // Fallback to /organization/{org_id}
+                        if (empty($bank_linking_url)) {
+                            $org_response = wp_remote_get($api_url . '/organization/' . $org_id, array(
+                                'headers' => array(
+                                    'X-API-KEY' => $this->api_key,
+                                    'X-APP-ID' => $this->app_id,
+                                    'accept' => 'application/json'
+                                ),
+                                'timeout' => 30
+                            ));
+
+                            if (!is_wp_error($org_response)) {
+                                $org_body = json_decode(wp_remote_retrieve_body($org_response), true);
+                                $bank_linking_url = $org_body['partner_embedded_url'] ?? $org_body['bankLinkingUrl'] ?? '';
+                            }
+                        }
+
+                        if (!empty($bank_linking_url)) {
+                            // Save and return existing org data
+                            if ($is_guest) {
+                                WC()->session->set('monarch_temp_org_id', $org_id);
+                                WC()->session->set('monarch_temp_user_id', $user_id);
+                            } else {
+                                $customer_id = get_current_user_id();
+                                update_user_meta($customer_id, '_monarch_temp_org_id', $org_id);
+                                update_user_meta($customer_id, '_monarch_temp_user_id', $user_id);
+                            }
+
+                            wp_send_json_success(array(
+                                'org_id' => $org_id,
+                                'user_id' => $user_id,
+                                'bank_linking_url' => $bank_linking_url,
+                                'existing_user' => true,
+                                'found_via_fallback' => true
+                            ));
+                            return;
+                        }
+                    }
+
+                    // If fallback also failed, show a more helpful error
+                    wp_send_json_error('This email is already registered. Please use the "Welcome back" option or contact support.');
+                    return;
+                }
+
                 wp_send_json_error($org_result['error']);
             }
 
@@ -1839,17 +1924,47 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 $org_result = $monarch_api->create_organization($customer_data);
 
                 if (!$org_result['success']) {
-                    wp_send_json_error('Organization creation failed: ' . $org_result['error']);
+                    // Check if the error is "Email already in use" - if so, the user DOES exist
+                    // This is a fallback in case /getUserByEmail didn't find them
+                    $error_msg = strtolower($org_result['error'] ?? '');
+                    if (strpos($error_msg, 'email') !== false && (strpos($error_msg, 'already') !== false || strpos($error_msg, 'exists') !== false || strpos($error_msg, 'in use') !== false)) {
+                        $logger->debug('========== MANUAL ENTRY FALLBACK: Email exists error caught ==========');
+                        $logger->debug('Manual entry: Organization creation failed with "email exists" error. Attempting to find existing org.', array(
+                            'email' => $user_email,
+                            'error' => $org_result['error']
+                        ));
+
+                        // Try to find the existing organization
+                        $existing_org = $this->find_organization_by_email($user_email);
+
+                        if ($existing_org && !empty($existing_org['orgId'] ?? $existing_org['_id'] ?? null)) {
+                            $org_id = $existing_org['orgId'] ?? $existing_org['org_id'] ?? null;
+                            $user_id = $existing_org['_id'] ?? $existing_org['userId'] ?? null;
+                            $is_existing_user = true;
+
+                            $logger->debug('MANUAL ENTRY FALLBACK SUCCESS: Found existing organization', array(
+                                'org_id' => $org_id,
+                                'user_id' => $user_id
+                            ));
+                            // Continue to PayToken creation below
+                        } else {
+                            wp_send_json_error('This email is already registered. Please use the "Welcome back" option or contact support.');
+                            return;
+                        }
+                    } else {
+                        wp_send_json_error('Organization creation failed: ' . $org_result['error']);
+                        return;
+                    }
+                } else {
+                    $user_id = $org_result['data']['_id'];
+                    $org_id = $org_result['data']['orgId'];
+
+                    // Log organization creation
+                    $logger->log_customer_event('organization_created_manual', $customer_id, array(
+                        'org_id' => $org_id,
+                        'user_id' => $user_id
+                    ));
                 }
-
-                $user_id = $org_result['data']['_id'];
-                $org_id = $org_result['data']['orgId'];
-
-                // Log organization creation
-                $logger->log_customer_event('organization_created_manual', $customer_id, array(
-                    'org_id' => $org_id,
-                    'user_id' => $user_id
-                ));
             } else {
                 $logger->debug('Manual entry: Using existing organization', array(
                     'org_id' => $org_id,
