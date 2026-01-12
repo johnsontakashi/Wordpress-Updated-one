@@ -904,23 +904,103 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 $logger->debug('SUCCESS: Existing user found by email - will NOT create new organization', array(
                     'email' => $user_email,
                     'org_id' => $found_org_id,
-                    'user_id' => $found_user_id
+                    'user_id' => $found_user_id,
+                    'full_data_keys' => isset($existing_user['data']) ? array_keys($existing_user['data']) : 'no data',
+                    'full_data' => $existing_user['data'] ?? 'none'
                 ));
 
                 // Use the found values
                 $org_id = $found_org_id;
                 $user_id = $found_user_id;
 
-                // Get bank linking URL for existing organization
-                $bank_linking_url = $this->get_bank_linking_url_for_org($org_id, $logger);
+                // FIRST: Check if we have a stored bank linking URL from previous registration
+                $bank_linking_url = '';
+                if (!$is_guest) {
+                    $stored_url = get_user_meta($customer_id, '_monarch_bank_linking_url', true);
+                    if (!empty($stored_url)) {
+                        $bank_linking_url = $stored_url;
+                        $logger->debug('Found stored bank linking URL from user meta', array(
+                            'url_length' => strlen($bank_linking_url)
+                        ));
+                    }
+                } else {
+                    $stored_url = WC()->session->get('monarch_bank_linking_url');
+                    if (!empty($stored_url)) {
+                        $bank_linking_url = $stored_url;
+                        $logger->debug('Found stored bank linking URL from session', array(
+                            'url_length' => strlen($bank_linking_url)
+                        ));
+                    }
+                }
 
-                // If still no URL, return error instead of empty URL
+                // SECOND: Check if the /merchants/verify response has the bank linking URL
+                if (empty($bank_linking_url) && !empty($existing_user['data'])) {
+                    $data = $existing_user['data'];
+                    $bank_linking_url = $data['partner_embedded_url'] ?? $data['bankLinkingUrl'] ?? $data['bank_linking_url'] ??
+                                       $data['connectionUrl'] ?? $data['connection_url'] ?? $data['url'] ??
+                                       $data['embedUrl'] ?? $data['embed_url'] ?? '';
+
+                    if (!empty($bank_linking_url)) {
+                        $logger->debug('Found bank linking URL directly in /merchants/verify response', array(
+                            'url' => $bank_linking_url
+                        ));
+                    }
+                }
+
+                // THIRD: If no URL yet, try fetching from various endpoints
                 if (empty($bank_linking_url)) {
-                    $logger->error('Failed to get bank linking URL for existing organization', array(
+                    $bank_linking_url = $this->get_bank_linking_url_for_org($org_id, $logger);
+                }
+
+                // THIRD: If still no URL, try calling create_organization again
+                // Some APIs return the existing org with URL when you try to create with existing email
+                if (empty($bank_linking_url)) {
+                    $logger->debug('No URL found - trying create_organization as fallback for existing user');
+
+                    $retry_result = $monarch_api->create_organization($customer_data);
+
+                    if ($retry_result['success'] && !empty($retry_result['data'])) {
+                        $bank_linking_url = $retry_result['data']['partner_embedded_url'] ??
+                                           $retry_result['data']['bankLinkingUrl'] ??
+                                           $retry_result['data']['connectionUrl'] ?? '';
+
+                        if (!empty($bank_linking_url)) {
+                            $logger->debug('Got URL from create_organization retry', array(
+                                'url' => $bank_linking_url
+                            ));
+                        }
+                    } else {
+                        // Check if the error response contains the URL
+                        $error_data = $retry_result['response'] ?? [];
+                        if (!empty($error_data)) {
+                            $bank_linking_url = $error_data['partner_embedded_url'] ??
+                                               $error_data['bankLinkingUrl'] ??
+                                               $error_data['connectionUrl'] ?? '';
+
+                            if (!empty($bank_linking_url)) {
+                                $logger->debug('Got URL from create_organization error response', array(
+                                    'url' => $bank_linking_url
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                // Final check - if still no URL, clear user data and let them start fresh
+                if (empty($bank_linking_url)) {
+                    $logger->error('Failed to get bank linking URL for existing organization - clearing stored data', array(
                         'org_id' => $org_id,
                         'user_id' => $user_id
                     ));
-                    wp_send_json_error('Unable to retrieve bank linking URL. Please try again or contact support.');
+
+                    // Clear the stored Monarch data so user can start fresh
+                    if (!$is_guest && $customer_id) {
+                        delete_user_meta($customer_id, '_monarch_org_id');
+                        delete_user_meta($customer_id, '_monarch_temp_org_id');
+                        delete_user_meta($customer_id, '_monarch_paytoken_id');
+                    }
+
+                    wp_send_json_error('Your bank connection has expired. Please enter your information again to reconnect.');
                     return;
                 }
 
@@ -1057,16 +1137,24 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             }
             
             // Save organization data temporarily (will be permanent after bank connection)
+            // IMPORTANT: Also save the bank_linking_url for reuse with returning customers
             if ($is_guest) {
                 // For guest users, store in WooCommerce session
                 WC()->session->set('monarch_temp_org_id', $org_id);
                 WC()->session->set('monarch_temp_user_id', $user_id);
                 WC()->session->set('monarch_temp_api_data', $org_result['data']);
+                if (!empty($bank_linking_url)) {
+                    WC()->session->set('monarch_bank_linking_url', $bank_linking_url);
+                }
             } else {
                 // For logged-in users, store in user meta
                 $customer_id = get_current_user_id();
                 update_user_meta($customer_id, '_monarch_temp_org_id', $org_id);
                 update_user_meta($customer_id, '_monarch_temp_user_id', $user_id);
+                // Save bank linking URL permanently for returning customer use
+                if (!empty($bank_linking_url)) {
+                    update_user_meta($customer_id, '_monarch_bank_linking_url', $bank_linking_url);
+                }
             }
 
             // Store the purchaser org's API credentials for transactions
@@ -1532,7 +1620,21 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 'using_purchaser_credentials' => !empty($purchaser_api_key)
             ));
 
-            // First, check if user already has a valid paytoken
+            // FIRST: Check if we have a stored bank linking URL
+            $stored_url = get_user_meta($customer_id, '_monarch_bank_linking_url', true);
+            if (!empty($stored_url)) {
+                $logger->debug('Found stored bank linking URL for returning user', array(
+                    'url_length' => strlen($stored_url)
+                ));
+                wp_send_json_success(array(
+                    'bank_linking_url' => $stored_url,
+                    'org_id' => $org_id,
+                    'source' => 'stored'
+                ));
+                return;
+            }
+
+            // SECOND: Check if user already has a valid paytoken
             $api_url = $this->testmode
                 ? 'https://devapi.monarch.is/v1'
                 : 'https://api.monarch.is/v1';

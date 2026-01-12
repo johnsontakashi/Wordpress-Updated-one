@@ -1,6 +1,6 @@
 # Monarch WooCommerce Payment Gateway - Developer Guide
 
-**Version:** 1.0.21
+**Version:** 1.0.23
 **Requires WordPress:** 5.0+
 **Requires WooCommerce:** 5.0+
 **Tested up to:** WordPress 6.4, WooCommerce 8.0
@@ -308,6 +308,22 @@ For plugin-specific issues, check the logs and transaction details in the WordPr
 ---
 
 ## Changelog
+
+### Version 1.0.23
+- **SOLUTION: Store and reuse bank linking URL**
+- Now saves `partner_embedded_url` to user meta when first created (`_monarch_bank_linking_url`)
+- For returning users, first checks stored URL before trying API endpoints
+- If no URL can be found, clears user's Monarch data so they can register fresh
+- Changed error message to guide user: "Your bank connection has expired. Please enter your information again."
+- This allows returning users to re-register with same email (Monarch allows this)
+
+### Version 1.0.22
+- **NEW APPROACH: 3-step URL retrieval for existing users**
+- Step 1: Check if `/merchants/verify` response contains `partner_embedded_url` directly
+- Step 2: If not, try the 10 different API endpoints to fetch/regenerate URL
+- Step 3: If still no URL, retry `create_organization` - some APIs return existing org with URL
+- Added comprehensive logging of full `/merchants/verify` response data
+- Checks both success response AND error response for URL fields
 
 ### Version 1.0.21
 - **EXPANDED: Now tries 10 API endpoints to find/regenerate bank linking URL**

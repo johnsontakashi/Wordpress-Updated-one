@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Monarch WooCommerce Payment Gateway
  * Description: Monarch Payment Gateway.
- * Version: 1.0.21
+ * Version: 1.0.23
  * Author: Monarch Technologies Inc.
  * License: GPL v2 or later
  * Requires at least: 5.0
@@ -31,7 +31,7 @@ if (!in_array('woocommerce/woocommerce.php', $active_plugins) && !class_exists('
     return;
 }
 
-define('WC_MONARCH_ACH_VERSION', '1.0.21');
+define('WC_MONARCH_ACH_VERSION', '1.0.23');
 define('WC_MONARCH_ACH_PLUGIN_PATH', plugin_dir_path(__FILE__));
 define('WC_MONARCH_ACH_PLUGIN_URL', plugin_dir_url(__FILE__));
 
