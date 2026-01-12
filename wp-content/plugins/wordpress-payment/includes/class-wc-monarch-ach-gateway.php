@@ -986,48 +986,55 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                     }
                 }
 
-                // Final check - if still no URL, clear user data and let them start fresh
+                // Final check - if still no URL, try creating a NEW organization
+                // Monarch may allow creating with same email if existing org is inactive/old
                 if (empty($bank_linking_url)) {
-                    $logger->error('Failed to get bank linking URL for existing organization - clearing stored data', array(
-                        'org_id' => $org_id,
-                        'user_id' => $user_id
+                    $logger->debug('No URL for existing org - attempting to create fresh organization', array(
+                        'existing_org_id' => $org_id,
+                        'email' => $user_email
                     ));
 
-                    // Clear the stored Monarch data so user can start fresh
+                    // Clear the stored Monarch data
                     if (!$is_guest && $customer_id) {
                         delete_user_meta($customer_id, '_monarch_org_id');
                         delete_user_meta($customer_id, '_monarch_temp_org_id');
                         delete_user_meta($customer_id, '_monarch_paytoken_id');
+                        delete_user_meta($customer_id, '_monarch_bank_linking_url');
                     }
 
-                    wp_send_json_error('Your bank connection has expired. Please enter your information again to reconnect.');
+                    // Try creating a NEW organization - this will fall through to the "user not found" flow below
+                    // Reset user_exists flag so we proceed with new org creation
+                    $user_exists = false;
+                    $found_org_id = null;
+
+                    $logger->debug('Reset user_exists flag - will proceed to create new organization');
+                } else {
+                    // We have a valid bank_linking_url - return existing organization
+                    $logger->debug('Using existing organization', array(
+                        'org_id' => $org_id,
+                        'user_id' => $user_id,
+                        'bank_linking_url' => $bank_linking_url
+                    ));
+
+                    // Save organization data
+                    if ($is_guest) {
+                        WC()->session->set('monarch_temp_org_id', $org_id);
+                        WC()->session->set('monarch_temp_user_id', $user_id);
+                    } else {
+                        $customer_id = get_current_user_id();
+                        update_user_meta($customer_id, '_monarch_temp_org_id', $org_id);
+                        update_user_meta($customer_id, '_monarch_temp_user_id', $user_id);
+                    }
+
+                    // Return existing organization data with bank linking URL
+                    wp_send_json_success(array(
+                        'org_id' => $org_id,
+                        'user_id' => $user_id,
+                        'bank_linking_url' => $bank_linking_url,
+                        'existing_user' => true
+                    ));
                     return;
                 }
-
-                $logger->debug('Using existing organization', array(
-                    'org_id' => $org_id,
-                    'user_id' => $user_id,
-                    'bank_linking_url' => $bank_linking_url
-                ));
-
-                // Save organization data
-                if ($is_guest) {
-                    WC()->session->set('monarch_temp_org_id', $org_id);
-                    WC()->session->set('monarch_temp_user_id', $user_id);
-                } else {
-                    $customer_id = get_current_user_id();
-                    update_user_meta($customer_id, '_monarch_temp_org_id', $org_id);
-                    update_user_meta($customer_id, '_monarch_temp_user_id', $user_id);
-                }
-
-                // Return existing organization data with bank linking URL
-                wp_send_json_success(array(
-                    'org_id' => $org_id,
-                    'user_id' => $user_id,
-                    'bank_linking_url' => $bank_linking_url,
-                    'existing_user' => true
-                ));
-                return;
             }
 
             // STEP 1: Create organization (only if user doesn't exist)
@@ -1088,8 +1095,13 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                         }
                     }
 
-                    // If fallback also failed, show a more helpful error
-                    wp_send_json_error('This email is already registered. Please use the "Welcome back" option or contact support.');
+                    // If fallback also failed - this email exists in Monarch but we can't get a bank linking URL
+                    // This is a Monarch API limitation - clear data and let them try a different email or contact support
+                    $logger->error('Email exists in Monarch but cannot retrieve bank linking URL - API limitation', array(
+                        'email' => $user_email
+                    ));
+
+                    wp_send_json_error('This email is registered but the bank connection cannot be retrieved. Please try using a different email address, or contact support for assistance.');
                     return;
                 }
 
@@ -1687,7 +1699,18 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 $logger->error('ajax_get_bank_linking_url: Could not retrieve bank linking URL from any endpoint', array(
                     'org_id' => $org_id
                 ));
-                wp_send_json_error('Unable to retrieve bank linking URL. Please try again or contact support.');
+
+                // Clear the user's Monarch data so they can re-register
+                $this->clear_user_monarch_data($customer_id);
+
+                $logger->debug('Cleared user Monarch data - they need to re-register');
+
+                // Return special response to tell frontend to show registration form
+                wp_send_json_error(array(
+                    'message' => 'Your bank connection needs to be refreshed. Please complete the registration form below to reconnect.',
+                    'action' => 'show_registration_form',
+                    'cleared_data' => true
+                ));
                 return;
             }
 
@@ -2054,6 +2077,7 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
         delete_user_meta($customer_id, '_monarch_temp_user_id');
         delete_user_meta($customer_id, '_monarch_temp_org_api_key');
         delete_user_meta($customer_id, '_monarch_temp_org_app_id');
+        delete_user_meta($customer_id, '_monarch_bank_linking_url');
     }
 
     /**

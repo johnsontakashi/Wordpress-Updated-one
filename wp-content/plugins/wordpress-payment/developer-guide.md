@@ -1,6 +1,6 @@
 # Monarch WooCommerce Payment Gateway - Developer Guide
 
-**Version:** 1.0.23
+**Version:** 1.0.24
 **Requires WordPress:** 5.0+
 **Requires WooCommerce:** 5.0+
 **Tested up to:** WordPress 6.4, WooCommerce 8.0
@@ -308,6 +308,17 @@ For plugin-specific issues, check the logs and transaction details in the WordPr
 ---
 
 ## Changelog
+
+### Version 1.0.24
+- **IMPROVED: Auto-recovery for returning users when bank URL not found**
+- When returning user's bank linking URL cannot be retrieved:
+  1. Clears all stored Monarch data for the user
+  2. Returns special response `action: 'show_registration_form'`
+  3. Frontend reloads page showing registration form automatically
+- User no longer sees confusing "Unable to retrieve bank linking URL" error
+- Instead, page refreshes and they can complete registration fresh
+- Improved error messages for email-already-exists fallback scenario
+- Added `_monarch_bank_linking_url` to `clear_user_monarch_data()` helper
 
 ### Version 1.0.23
 - **SOLUTION: Store and reuse bank linking URL**

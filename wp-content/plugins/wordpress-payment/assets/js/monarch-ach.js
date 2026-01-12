@@ -1022,8 +1022,16 @@ jQuery(document).ready(function($) {
                     // User already has a valid paytoken (rare case)
                     $('#monarch_paytoken_id').val(response.data.paytoken_id);
                     location.reload();
+                } else if (!response.success && response.data && response.data.action === 'show_registration_form') {
+                    // Bank connection expired - need to re-register
+                    // Reload the page to show the registration form (data has been cleared server-side)
+                    showError(response.data.message || 'Please complete registration to reconnect your bank.');
+                    setTimeout(function() {
+                        location.reload();
+                    }, 1500);
                 } else {
-                    showError(response.data || 'Failed to get bank linking URL. Please try again.');
+                    var errorMsg = (response.data && response.data.message) ? response.data.message : (response.data || 'Failed to get bank linking URL. Please try again.');
+                    showError(errorMsg);
                     $button.prop('disabled', false).text('Continue with Bank');
                     $spinner.hide();
                 }
