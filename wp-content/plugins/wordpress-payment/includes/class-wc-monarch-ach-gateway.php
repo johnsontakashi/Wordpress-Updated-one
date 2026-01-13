@@ -847,354 +847,99 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 'country' => sanitize_text_field($_POST['billing_country'])
             );
 
-            // STEP 0: Check if user already exists by email (prevents "email already exists" error)
-            $logger->debug('========== EMAIL LOOKUP START ==========');
-            $logger->debug('Checking if user already exists by email', array('email' => $user_email));
-            $existing_user = $monarch_api->get_user_by_email($user_email);
+            // STEP 1: Try to create organization first
+            $logger->debug('Creating organization', array('email' => $user_email));
+            $org_result = $monarch_api->create_organization($customer_data);
 
-            // Log the COMPLETE response from getUserByEmail for debugging
-            $logger->debug('getUserByEmail FULL RESPONSE', array(
-                'email_checked' => $user_email,
-                'user_exists' => $existing_user['user_exists'] ?? 'NOT SET',
-                'success' => $existing_user['success'] ?? 'NOT SET',
-                'org_id_direct' => $existing_user['org_id'] ?? 'NOT SET',
-                'data' => $existing_user['data'] ?? 'NOT SET',
-                'error' => $existing_user['error'] ?? 'NOT SET',
-                'status_code' => $existing_user['status_code'] ?? 'NOT SET',
-                'full_response' => $existing_user
-            ));
+            if ($org_result['success']) {
+                // NEW USER - organization created successfully
+                $user_id = $org_result['data']['_id'];
+                $org_id = $org_result['data']['orgId'];
+                $bank_linking_url = $org_result['data']['partner_embedded_url'] ?? '';
 
-            // Check if user exists using the new user_exists flag
-            $user_exists = $existing_user['user_exists'] ?? false;
-            $found_org_id = null;
-            $found_user_id = null;
-
-            if ($user_exists) {
-                // User exists - extract org_id
-                // First check if API returned org_id directly
-                $found_org_id = $existing_user['org_id'] ?? null;
-
-                // If not, search in data
-                if (!$found_org_id && !empty($existing_user['data'])) {
-                    $data = $existing_user['data'];
-                    $found_org_id = $data['orgId'] ?? $data['org_id'] ?? $data['organizationId'] ?? $data['organization_id'] ?? null;
-                    $found_user_id = $data['_id'] ?? $data['userId'] ?? $data['user_id'] ?? $data['id'] ?? null;
-                }
-
-                // Deep search as last resort
-                if (!$found_org_id) {
-                    $found_org_id = $this->find_org_id_recursive($existing_user);
-                }
-
-                $logger->debug('User EXISTS - extracted org_id', array(
-                    'found_org_id' => $found_org_id,
-                    'found_user_id' => $found_user_id
+                $logger->debug('New organization created', array(
+                    'org_id' => $org_id,
+                    'user_id' => $user_id,
+                    'has_bank_linking_url' => !empty($bank_linking_url)
                 ));
-            }
-
-            $logger->debug('========== EMAIL LOOKUP END ==========', array(
-                'user_exists' => $user_exists,
-                'final_org_id' => $found_org_id,
-                'final_user_id' => $found_user_id,
-                'will_use_existing' => $user_exists && !empty($found_org_id)
-            ));
-
-            if ($user_exists && $found_org_id) {
-                // User already exists - get data from /merchants/verify response
-                $logger->debug('Existing user found by email', array(
-                    'email' => $user_email,
-                    'org_id' => $found_org_id,
-                    'user_id' => $found_user_id
-                ));
-
-                $org_id = $found_org_id;
-                $user_id = $found_user_id;
-
-                // Get partner_embedded_url from the /merchants/verify response
-                $bank_linking_url = '';
-                if (!empty($existing_user['data'])) {
-                    $bank_linking_url = $existing_user['data']['partner_embedded_url'] ?? '';
-                    $user_id = $existing_user['data']['userId'] ?? $user_id;
-                }
-
-                // Check if user already has a paytoken (bank linked) via /getlatestpaytoken/{orgId}
-                $api_url = $this->testmode ? 'https://devapi.monarch.is/v1' : 'https://api.monarch.is/v1';
-                $paytoken_response = wp_remote_get($api_url . '/getlatestpaytoken/' . $org_id, array(
-                    'headers' => array(
-                        'accept' => 'application/json',
-                        'X-API-KEY' => $this->api_key,
-                        'X-APP-ID' => $this->app_id
-                    ),
-                    'timeout' => 30
-                ));
-
-                $has_paytoken = false;
-                $existing_paytoken_id = null;
-
-                if (!is_wp_error($paytoken_response)) {
-                    $paytoken_status = wp_remote_retrieve_response_code($paytoken_response);
-                    $paytoken_body = json_decode(wp_remote_retrieve_body($paytoken_response), true);
-
-                    $logger->debug('Checked for existing paytoken', array(
-                        'status_code' => $paytoken_status,
-                        'response' => $paytoken_body
-                    ));
-
-                    if ($paytoken_status >= 200 && $paytoken_status < 300 && !empty($paytoken_body)) {
-                        $existing_paytoken_id = $paytoken_body['_id'] ?? $paytoken_body['payTokenId'] ?? $paytoken_body['id'] ?? null;
-                        if (!empty($existing_paytoken_id)) {
-                            $has_paytoken = true;
-                            $logger->debug('User has existing paytoken', array('paytoken_id' => $existing_paytoken_id));
-                        }
-                    }
-                }
 
                 // Save org data
                 if ($is_guest) {
                     WC()->session->set('monarch_temp_org_id', $org_id);
                     WC()->session->set('monarch_temp_user_id', $user_id);
-                    if ($has_paytoken) {
-                        WC()->session->set('monarch_paytoken_id', $existing_paytoken_id);
-                    }
                 } else {
                     $customer_id = get_current_user_id();
                     update_user_meta($customer_id, '_monarch_temp_org_id', $org_id);
                     update_user_meta($customer_id, '_monarch_temp_user_id', $user_id);
-                    if ($has_paytoken) {
-                        update_user_meta($customer_id, '_monarch_paytoken_id', $existing_paytoken_id);
-                    }
                 }
-
-                if ($has_paytoken) {
-                    // User already has a bank linked - return success
-                    wp_send_json_success(array(
-                        'org_id' => $org_id,
-                        'user_id' => $user_id,
-                        'paytoken_id' => $existing_paytoken_id,
-                        'existing_user' => true,
-                        'has_bank' => true
-                    ));
-                    return;
-                }
-
-                // User exists but has no bank linked - use partner_embedded_url from /merchants/verify
-                $logger->debug('User exists but has no paytoken - returning bank linking URL', array(
-                    'org_id' => $org_id,
-                    'has_bank_linking_url' => !empty($bank_linking_url)
-                ));
 
                 wp_send_json_success(array(
                     'org_id' => $org_id,
                     'user_id' => $user_id,
                     'bank_linking_url' => $bank_linking_url,
-                    'existing_user' => true,
-                    'has_bank' => false
+                    'existing_user' => false
                 ));
                 return;
             }
 
-            // STEP 1: Create organization (only if user doesn't exist)
-            $logger->debug('========== USER NOT FOUND - CREATING NEW ORG ==========');
-            $logger->debug('User was NOT found by email lookup. Proceeding to create new organization.', array(
-                'email' => $user_email,
-                'reason' => !$existing_user['success'] ? 'API returned success=false' : 'API returned empty data',
-                'api_success' => $existing_user['success'] ?? false,
-                'api_error' => $existing_user['error'] ?? 'none'
-            ));
-            $org_result = $monarch_api->create_organization($customer_data);
+            // Organization creation failed - check if email already exists
+            $error_msg = strtolower($org_result['error'] ?? '');
+            $is_email_exists_error = strpos($error_msg, 'email') !== false &&
+                (strpos($error_msg, 'already') !== false || strpos($error_msg, 'exists') !== false || strpos($error_msg, 'in use') !== false);
 
-            if (!$org_result['success']) {
-                // Check if the error is "Email already in use"
-                $error_msg = strtolower($org_result['error'] ?? '');
-                if (strpos($error_msg, 'email') !== false && (strpos($error_msg, 'already') !== false || strpos($error_msg, 'exists') !== false || strpos($error_msg, 'in use') !== false)) {
-                    $logger->debug('Organization creation failed - email exists, retrying /merchants/verify', array(
-                        'email' => $user_email,
-                        'error' => $org_result['error']
-                    ));
-
-                    // Retry /merchants/verify since we now know user exists
-                    $retry_lookup = $monarch_api->get_user_by_email($user_email);
-
-                    if ($retry_lookup['success'] && !empty($retry_lookup['data'])) {
-                        $org_id = $retry_lookup['org_id'] ?? $retry_lookup['data']['orgId'] ?? null;
-                        $user_id = $retry_lookup['data']['userId'] ?? $retry_lookup['data']['_id'] ?? null;
-                        $bank_linking_url = $retry_lookup['data']['partner_embedded_url'] ?? '';
-
-                        $logger->debug('Retry lookup succeeded', array(
-                            'org_id' => $org_id,
-                            'user_id' => $user_id,
-                            'has_bank_linking_url' => !empty($bank_linking_url)
-                        ));
-
-                        if ($org_id) {
-                            // Save org data
-                            if ($is_guest) {
-                                WC()->session->set('monarch_temp_org_id', $org_id);
-                                WC()->session->set('monarch_temp_user_id', $user_id);
-                            } else {
-                                $customer_id = get_current_user_id();
-                                update_user_meta($customer_id, '_monarch_temp_org_id', $org_id);
-                                update_user_meta($customer_id, '_monarch_temp_user_id', $user_id);
-                            }
-
-                            wp_send_json_success(array(
-                                'org_id' => $org_id,
-                                'user_id' => $user_id,
-                                'bank_linking_url' => $bank_linking_url,
-                                'existing_user' => true,
-                                'has_bank' => false
-                            ));
-                            return;
-                        }
-                    }
-
-                    // If retry also failed, return the original error
-                    wp_send_json_error('This email is already registered but could not be retrieved. Please contact support.');
-                    return;
-                }
-
+            if (!$is_email_exists_error) {
+                // Some other error - return it
                 wp_send_json_error($org_result['error']);
+                return;
             }
 
-            // Log full response structure for debugging credential extraction
-            $logger->debug('Create Organization full response', array(
-                'response_keys' => array_keys($org_result['data'] ?? []),
-                'has_api_key' => isset($org_result['data']['api']),
-                'api_structure' => isset($org_result['data']['api']) ? array_keys($org_result['data']['api']) : 'not present',
-                'full_response' => $org_result['data']
+            // EXISTING USER - call /merchants/verify to get partner_embedded_url
+            $logger->debug('Email exists - calling /merchants/verify', array('email' => $user_email));
+            $verify_result = $monarch_api->get_user_by_email($user_email);
+
+            if (!$verify_result['success'] || empty($verify_result['data'])) {
+                $logger->error('/merchants/verify failed for existing user', array(
+                    'email' => $user_email,
+                    'error' => $verify_result['error'] ?? 'unknown'
+                ));
+                wp_send_json_error('Unable to retrieve your account. Please contact support.');
+                return;
+            }
+
+            // Got existing user data
+            $org_id = $verify_result['data']['orgId'] ?? null;
+            $user_id = $verify_result['data']['userId'] ?? null;
+            $bank_linking_url = $verify_result['data']['partner_embedded_url'] ?? '';
+
+            $logger->debug('Existing user found via /merchants/verify', array(
+                'org_id' => $org_id,
+                'user_id' => $user_id,
+                'has_bank_linking_url' => !empty($bank_linking_url)
             ));
 
-            $user_id = $org_result['data']['_id'];
-            $org_id = $org_result['data']['orgId'];
-            $bank_linking_url = $org_result['data']['partner_embedded_url'] ?? $org_result['data']['bankLinkingUrl'] ?? $org_result['data']['connectionUrl'] ?? '';
-            
-            // Clean up the URL format before sending to frontend
-            if (!empty($bank_linking_url)) {
-                // Remove any double-encoding or malformed URL structure
-                $bank_linking_url = urldecode($bank_linking_url);
-                
-                // Fix double-encoded URLs (common issue with callback URLs)
-                if (strpos($bank_linking_url, 'http%3A') !== false) {
-                    // This indicates a double-encoded URL
-                    $bank_linking_url = urldecode($bank_linking_url);
-                }
-                
-                // Ensure proper URL format - remove invalid hash fragments
-                if (strpos($bank_linking_url, '#') !== false && substr_count($bank_linking_url, '#') > 1) {
-                    $parts = explode('#', $bank_linking_url);
-                    $base_url = $parts[0];
-                    $hash_parts = array_slice($parts, 1);
-                    
-                    // Combine hash parts with & instead of multiple #
-                    $clean_hash = implode('&', $hash_parts);
-                    $bank_linking_url = $base_url . '#' . $clean_hash;
-                }
-                
-                // Validate the final URL
-                if (!filter_var($bank_linking_url, FILTER_VALIDATE_URL)) {
-                    error_log('Monarch ACH: Invalid bank linking URL after cleanup: ' . $bank_linking_url);
-                }
+            if (!$org_id) {
+                wp_send_json_error('Unable to retrieve your organization. Please contact support.');
+                return;
             }
-            
-            // Save organization data temporarily (will be permanent after bank connection)
-            // IMPORTANT: Also save the bank_linking_url for reuse with returning customers
+
+            // Save org data
             if ($is_guest) {
-                // For guest users, store in WooCommerce session
                 WC()->session->set('monarch_temp_org_id', $org_id);
                 WC()->session->set('monarch_temp_user_id', $user_id);
-                WC()->session->set('monarch_temp_api_data', $org_result['data']);
-                if (!empty($bank_linking_url)) {
-                    WC()->session->set('monarch_bank_linking_url', $bank_linking_url);
-                }
             } else {
-                // For logged-in users, store in user meta
                 $customer_id = get_current_user_id();
                 update_user_meta($customer_id, '_monarch_temp_org_id', $org_id);
                 update_user_meta($customer_id, '_monarch_temp_user_id', $user_id);
-                // Save bank linking URL permanently for returning customer use
-                if (!empty($bank_linking_url)) {
-                    update_user_meta($customer_id, '_monarch_bank_linking_url', $bank_linking_url);
-                }
             }
 
-            // Store the purchaser org's API credentials for transactions
-            // The Monarch API returns credentials in response.data.api.sandbox or response.data.api.prod
-            $org_api = $org_result['data']['api'] ?? null;
-            $purchaser_api_key = null;
-            $purchaser_app_id = null;
-
-            if ($org_api) {
-                $credentials_key = $this->testmode ? 'sandbox' : 'prod';
-                $org_credentials = $org_api[$credentials_key] ?? null;
-                if ($org_credentials) {
-                    $purchaser_api_key = $org_credentials['api_key'] ?? $org_credentials['apiKey'] ?? null;
-                    $purchaser_app_id = $org_credentials['app_id'] ?? $org_credentials['appId'] ?? null;
-                }
-            }
-
-            // If credentials not found in expected location, try alternative paths
-            if (!$purchaser_api_key) {
-                $purchaser_api_key = $org_result['data']['apiKey'] ?? $org_result['data']['api_key'] ?? null;
-            }
-            if (!$purchaser_app_id) {
-                $purchaser_app_id = $org_result['data']['appId'] ?? $org_result['data']['app_id'] ?? null;
-            }
-
-            // Save purchaser credentials if found - CRITICAL for avoiding paytoken errors
-            if ($purchaser_api_key && $purchaser_app_id) {
-                if ($is_guest) {
-                    // For guest users, store in session
-                    WC()->session->set('monarch_temp_org_api_key', $purchaser_api_key);
-                    WC()->session->set('monarch_temp_org_app_id', $purchaser_app_id);
-                } else {
-                    // For logged-in users, store in user meta
-                    update_user_meta($customer_id, '_monarch_temp_org_api_key', $purchaser_api_key);
-                    update_user_meta($customer_id, '_monarch_temp_org_app_id', $purchaser_app_id);
-                }
-                
-                $logger->debug('Purchaser credentials saved', array(
-                    'api_key_last_4' => substr($purchaser_api_key, -4),
-                    'app_id' => $purchaser_app_id,
-                    'user_type' => $is_guest ? 'guest' : 'logged_in'
-                ));
-            } else {
-                // WARNING: Without purchaser credentials, transactions may fail with "Paytoken is Invalid"
-                $logger->warning('Purchaser credentials NOT found in response - transactions may fail', array(
-                    'org_result_keys' => array_keys($org_result['data'] ?? []),
-                    'api_structure' => $org_api ? array_keys($org_api) : 'null',
-                    'user_type' => $is_guest ? 'guest' : 'logged_in'
-                ));
-                
-                // Still attempt to save any partial credentials found
-                if ($is_guest) {
-                    if ($purchaser_api_key) WC()->session->set('monarch_temp_org_api_key', $purchaser_api_key);
-                    if ($purchaser_app_id) WC()->session->set('monarch_temp_org_app_id', $purchaser_app_id);
-                } else {
-                    if ($purchaser_api_key) update_user_meta($customer_id, '_monarch_temp_org_api_key', $purchaser_api_key);
-                    if ($purchaser_app_id) update_user_meta($customer_id, '_monarch_temp_org_app_id', $purchaser_app_id);
-                }
-            }
-
-            // Log organization creation
-            $logger->log_customer_event('organization_created', $customer_id, array(
-                'org_id' => $org_id,
-                'user_id' => $user_id,
-                'has_purchaser_credentials' => !empty($purchaser_api_key)
-            ));
-
-            // Log the bank linking URL for debugging
-            $logger->debug('Bank linking URL details', array(
-                'original_url' => $org_result['data']['partner_embedded_url'] ?? 'not set',
-                'cleaned_url' => $bank_linking_url,
-                'has_placeholders' => strpos($bank_linking_url, '{') !== false
-            ));
-
+            // Return existing user with bank linking URL
             wp_send_json_success(array(
                 'org_id' => $org_id,
                 'user_id' => $user_id,
-                'bank_linking_url' => $bank_linking_url
+                'bank_linking_url' => $bank_linking_url,
+                'existing_user' => true
             ));
-            
+
         } catch (Exception $e) {
             wp_send_json_error('Organization creation failed: ' . $e->getMessage());
         }

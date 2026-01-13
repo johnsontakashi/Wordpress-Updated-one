@@ -154,15 +154,16 @@ class Monarch_API {
         $headers = array(
             'accept' => 'application/json',
             'X-API-KEY' => $this->api_key,
-            'X-APP-ID' => $this->app_id,
-            'Content-Type' => 'application/json'
+            'X-APP-ID' => $this->app_id
         );
 
         // Use /merchants/verify/{email} - returns partner_embedded_url for existing users
         $url = $this->base_url . '/merchants/verify/' . urlencode($email);
         $logger->debug('get_user_by_email: Calling /merchants/verify', array(
             'email' => $email,
-            'url' => $url
+            'url' => $url,
+            'api_key_last_4' => substr($this->api_key, -4),
+            'app_id' => $this->app_id
         ));
 
         $response = wp_remote_get($url, array(
@@ -171,43 +172,59 @@ class Monarch_API {
             'sslverify' => true
         ));
 
-        if (!is_wp_error($response)) {
-            $status_code = wp_remote_retrieve_response_code($response);
-            $body = wp_remote_retrieve_body($response);
-            $decoded = json_decode($body, true);
-
-            $logger->debug('get_user_by_email: /merchants/verify response', array(
-                'status_code' => $status_code,
-                'body' => $decoded
+        // Check for WP error
+        if (is_wp_error($response)) {
+            $logger->error('get_user_by_email: WP error', array(
+                'error' => $response->get_error_message()
             ));
+            return array(
+                'success' => false,
+                'error' => $response->get_error_message(),
+                'user_exists' => false,
+                'status_code' => 0
+            );
+        }
 
-            // 200 = User found
-            if ($status_code >= 200 && $status_code < 300 && !empty($decoded)) {
-                $org_id = $decoded['orgId'] ?? null;
-                if ($org_id) {
-                    $logger->debug('get_user_by_email: User found', array(
-                        'org_id' => $org_id,
-                        'has_partner_embedded_url' => !empty($decoded['partner_embedded_url'])
-                    ));
-                    return array(
-                        'success' => true,
-                        'data' => $decoded,
-                        'user_exists' => true,
-                        'status_code' => $status_code,
-                        'org_id' => $org_id
-                    );
-                }
+        $status_code = wp_remote_retrieve_response_code($response);
+        $body = wp_remote_retrieve_body($response);
+        $decoded = json_decode($body, true);
+
+        $logger->debug('get_user_by_email: /merchants/verify response', array(
+            'status_code' => $status_code,
+            'body' => $decoded,
+            'raw_body' => $body
+        ));
+
+        // 200 = User found
+        if ($status_code >= 200 && $status_code < 300 && !empty($decoded)) {
+            $org_id = $decoded['orgId'] ?? null;
+            if ($org_id) {
+                $logger->debug('get_user_by_email: User found', array(
+                    'org_id' => $org_id,
+                    'has_partner_embedded_url' => !empty($decoded['partner_embedded_url'])
+                ));
+                return array(
+                    'success' => true,
+                    'data' => $decoded,
+                    'user_exists' => true,
+                    'status_code' => $status_code,
+                    'org_id' => $org_id
+                );
             }
         }
 
-        // User not found
-        $logger->debug('get_user_by_email: User NOT found', array('email' => $email));
+        // User not found or error
+        $logger->debug('get_user_by_email: User NOT found or error', array(
+            'email' => $email,
+            'status_code' => $status_code,
+            'response' => $decoded
+        ));
 
         return array(
             'success' => false,
-            'error' => 'User not found',
+            'error' => $decoded['message'] ?? $decoded['error'] ?? 'User not found',
             'user_exists' => false,
-            'status_code' => 404
+            'status_code' => $status_code
         );
     }
 
