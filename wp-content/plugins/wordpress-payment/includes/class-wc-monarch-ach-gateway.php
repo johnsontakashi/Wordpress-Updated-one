@@ -900,7 +900,7 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             ));
 
             if ($user_exists && $found_org_id) {
-                // User already exists - check if they have a bank linked (paytoken)
+                // User already exists - get data from /merchants/verify response
                 $logger->debug('Existing user found by email', array(
                     'email' => $user_email,
                     'org_id' => $found_org_id,
@@ -909,6 +909,13 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
 
                 $org_id = $found_org_id;
                 $user_id = $found_user_id;
+
+                // Get partner_embedded_url from the /merchants/verify response
+                $bank_linking_url = '';
+                if (!empty($existing_user['data'])) {
+                    $bank_linking_url = $existing_user['data']['partner_embedded_url'] ?? '';
+                    $user_id = $existing_user['data']['userId'] ?? $user_id;
+                }
 
                 // Check if user already has a paytoken (bank linked) via /getlatestpaytoken/{orgId}
                 $api_url = $this->testmode ? 'https://devapi.monarch.is/v1' : 'https://api.monarch.is/v1';
@@ -942,19 +949,24 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                     }
                 }
 
-                if ($has_paytoken) {
-                    // User already has a bank linked - save data and return success
-                    if ($is_guest) {
-                        WC()->session->set('monarch_temp_org_id', $org_id);
-                        WC()->session->set('monarch_temp_user_id', $user_id);
+                // Save org data
+                if ($is_guest) {
+                    WC()->session->set('monarch_temp_org_id', $org_id);
+                    WC()->session->set('monarch_temp_user_id', $user_id);
+                    if ($has_paytoken) {
                         WC()->session->set('monarch_paytoken_id', $existing_paytoken_id);
-                    } else {
-                        $customer_id = get_current_user_id();
-                        update_user_meta($customer_id, '_monarch_temp_org_id', $org_id);
-                        update_user_meta($customer_id, '_monarch_temp_user_id', $user_id);
+                    }
+                } else {
+                    $customer_id = get_current_user_id();
+                    update_user_meta($customer_id, '_monarch_temp_org_id', $org_id);
+                    update_user_meta($customer_id, '_monarch_temp_user_id', $user_id);
+                    if ($has_paytoken) {
                         update_user_meta($customer_id, '_monarch_paytoken_id', $existing_paytoken_id);
                     }
+                }
 
+                if ($has_paytoken) {
+                    // User already has a bank linked - return success
                     wp_send_json_success(array(
                         'org_id' => $org_id,
                         'user_id' => $user_id,
@@ -965,31 +977,18 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                     return;
                 }
 
-                // User exists but has no bank linked
-                // The partner_embedded_url is only returned when organization is created
-                // Offer manual bank entry as the solution
-                $logger->debug('User exists but has no paytoken - manual bank entry required', array(
+                // User exists but has no bank linked - use partner_embedded_url from /merchants/verify
+                $logger->debug('User exists but has no paytoken - returning bank linking URL', array(
                     'org_id' => $org_id,
-                    'email' => $user_email
+                    'has_bank_linking_url' => !empty($bank_linking_url)
                 ));
-
-                // Save org data so manual bank entry can use it
-                if ($is_guest) {
-                    WC()->session->set('monarch_temp_org_id', $org_id);
-                    WC()->session->set('monarch_temp_user_id', $user_id);
-                } else {
-                    $customer_id = get_current_user_id();
-                    update_user_meta($customer_id, '_monarch_temp_org_id', $org_id);
-                    update_user_meta($customer_id, '_monarch_temp_user_id', $user_id);
-                }
 
                 wp_send_json_success(array(
                     'org_id' => $org_id,
                     'user_id' => $user_id,
+                    'bank_linking_url' => $bank_linking_url,
                     'existing_user' => true,
-                    'has_bank' => false,
-                    'require_manual_entry' => true,
-                    'message' => 'This email is already registered. Please enter your bank details manually.'
+                    'has_bank' => false
                 ));
                 return;
             }
@@ -1008,13 +1007,49 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 // Check if the error is "Email already in use"
                 $error_msg = strtolower($org_result['error'] ?? '');
                 if (strpos($error_msg, 'email') !== false && (strpos($error_msg, 'already') !== false || strpos($error_msg, 'exists') !== false || strpos($error_msg, 'in use') !== false)) {
-                    $logger->debug('Organization creation failed - email already exists', array(
+                    $logger->debug('Organization creation failed - email exists, retrying /merchants/verify', array(
                         'email' => $user_email,
                         'error' => $org_result['error']
                     ));
 
-                    // Email exists but wasn't found by lookup - tell user to use manual bank entry
-                    wp_send_json_error('This email is already registered. Please use manual bank entry to link your bank account.');
+                    // Retry /merchants/verify since we now know user exists
+                    $retry_lookup = $monarch_api->get_user_by_email($user_email);
+
+                    if ($retry_lookup['success'] && !empty($retry_lookup['data'])) {
+                        $org_id = $retry_lookup['org_id'] ?? $retry_lookup['data']['orgId'] ?? null;
+                        $user_id = $retry_lookup['data']['userId'] ?? $retry_lookup['data']['_id'] ?? null;
+                        $bank_linking_url = $retry_lookup['data']['partner_embedded_url'] ?? '';
+
+                        $logger->debug('Retry lookup succeeded', array(
+                            'org_id' => $org_id,
+                            'user_id' => $user_id,
+                            'has_bank_linking_url' => !empty($bank_linking_url)
+                        ));
+
+                        if ($org_id) {
+                            // Save org data
+                            if ($is_guest) {
+                                WC()->session->set('monarch_temp_org_id', $org_id);
+                                WC()->session->set('monarch_temp_user_id', $user_id);
+                            } else {
+                                $customer_id = get_current_user_id();
+                                update_user_meta($customer_id, '_monarch_temp_org_id', $org_id);
+                                update_user_meta($customer_id, '_monarch_temp_user_id', $user_id);
+                            }
+
+                            wp_send_json_success(array(
+                                'org_id' => $org_id,
+                                'user_id' => $user_id,
+                                'bank_linking_url' => $bank_linking_url,
+                                'existing_user' => true,
+                                'has_bank' => false
+                            ));
+                            return;
+                        }
+                    }
+
+                    // If retry also failed, return the original error
+                    wp_send_json_error('This email is already registered but could not be retrieved. Please contact support.');
                     return;
                 }
 

@@ -142,11 +142,8 @@ class Monarch_API {
     }
 
     /**
-     * Check if user exists by email - tries multiple endpoints
-     *
-     * Endpoints tried in order:
-     * 1. /merchants/verify/{email} - Per Monarch support recommendation
-     * 2. /getUserByEmail/{email} - Original endpoint (fallback)
+     * Check if user exists by email using /merchants/verify endpoint
+     * This endpoint returns partner_embedded_url for existing purchasers
      *
      * @param string $email The user's email address
      * @return array Response with success status and user/org data if exists
@@ -161,93 +158,50 @@ class Monarch_API {
             'Content-Type' => 'application/json'
         );
 
-        // ========== METHOD 1: Try /merchants/verify/{email} ==========
-        $url1 = $this->base_url . '/merchants/verify/' . urlencode($email);
-        $logger->debug('get_user_by_email: Trying /merchants/verify', array(
+        // Use /merchants/verify/{email} - returns partner_embedded_url for existing users
+        $url = $this->base_url . '/merchants/verify/' . urlencode($email);
+        $logger->debug('get_user_by_email: Calling /merchants/verify', array(
             'email' => $email,
-            'url' => $url1
+            'url' => $url
         ));
 
-        $response1 = wp_remote_get($url1, array(
+        $response = wp_remote_get($url, array(
             'headers' => $headers,
             'timeout' => 30,
             'sslverify' => true
         ));
 
-        if (!is_wp_error($response1)) {
-            $status_code1 = wp_remote_retrieve_response_code($response1);
-            $body1 = wp_remote_retrieve_body($response1);
-            $decoded1 = json_decode($body1, true);
+        if (!is_wp_error($response)) {
+            $status_code = wp_remote_retrieve_response_code($response);
+            $body = wp_remote_retrieve_body($response);
+            $decoded = json_decode($body, true);
 
             $logger->debug('get_user_by_email: /merchants/verify response', array(
-                'status_code' => $status_code1,
-                'body' => $decoded1
+                'status_code' => $status_code,
+                'body' => $decoded
             ));
 
             // 200 = User found
-            if ($status_code1 >= 200 && $status_code1 < 300 && !empty($decoded1)) {
-                $org_id = $decoded1['orgId'] ?? null;
+            if ($status_code >= 200 && $status_code < 300 && !empty($decoded)) {
+                $org_id = $decoded['orgId'] ?? null;
                 if ($org_id) {
-                    $logger->debug('get_user_by_email: User found via /merchants/verify', array(
+                    $logger->debug('get_user_by_email: User found', array(
                         'org_id' => $org_id,
-                        'org_type' => $decoded1['orgType'] ?? 'unknown'
+                        'has_partner_embedded_url' => !empty($decoded['partner_embedded_url'])
                     ));
                     return array(
                         'success' => true,
-                        'data' => $decoded1,
+                        'data' => $decoded,
                         'user_exists' => true,
-                        'status_code' => $status_code1,
+                        'status_code' => $status_code,
                         'org_id' => $org_id
                     );
                 }
             }
         }
 
-        // ========== METHOD 2: Try /getUserByEmail/{email} ==========
-        $url2 = $this->base_url . '/getUserByEmail/' . urlencode($email);
-        $logger->debug('get_user_by_email: Trying /getUserByEmail', array(
-            'email' => $email,
-            'url' => $url2
-        ));
-
-        $response2 = wp_remote_get($url2, array(
-            'headers' => $headers,
-            'timeout' => 30,
-            'sslverify' => true
-        ));
-
-        if (!is_wp_error($response2)) {
-            $status_code2 = wp_remote_retrieve_response_code($response2);
-            $body2 = wp_remote_retrieve_body($response2);
-            $decoded2 = json_decode($body2, true);
-
-            $logger->debug('get_user_by_email: /getUserByEmail response', array(
-                'status_code' => $status_code2,
-                'body' => $decoded2
-            ));
-
-            // 200 = User found
-            if ($status_code2 >= 200 && $status_code2 < 300 && !empty($decoded2)) {
-                $org_id = $this->extract_org_id_from_response($decoded2);
-                if ($org_id) {
-                    $logger->debug('get_user_by_email: User found via /getUserByEmail', array(
-                        'org_id' => $org_id
-                    ));
-                    return array(
-                        'success' => true,
-                        'data' => $decoded2,
-                        'user_exists' => true,
-                        'status_code' => $status_code2,
-                        'org_id' => $org_id
-                    );
-                }
-            }
-        }
-
-        // ========== No user found by any method ==========
-        $logger->debug('get_user_by_email: User NOT found by any endpoint', array(
-            'email' => $email
-        ));
+        // User not found
+        $logger->debug('get_user_by_email: User NOT found', array('email' => $email));
 
         return array(
             'success' => false,
