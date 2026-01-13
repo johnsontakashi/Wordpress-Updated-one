@@ -1,6 +1,6 @@
 # Monarch WooCommerce Payment Gateway - Merchant Guide
 
-**Version:** 1.0.24
+**Version:** 1.0.25
 **Requires WordPress:** 5.0+
 **Requires WooCommerce:** 5.0+
 **Tested up to:** WordPress 6.4, WooCommerce 8.0
@@ -282,4 +282,4 @@ For WordPress/WooCommerce integration issues:
 
 ---
 
-*Monarch WooCommerce Payment Gateway v1.0.23*
+*Monarch WooCommerce Payment Gateway v1.0.25*

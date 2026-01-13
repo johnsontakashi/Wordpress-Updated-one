@@ -1390,8 +1390,17 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 $purchaser_api_key = $temp_api_data['api']['sandbox']['api_key'] ?? null;
                 $purchaser_app_id = $temp_api_data['api']['sandbox']['app_id'] ?? null;
             } else {
+                // Check BOTH temp (new registration) AND permanent (returning user) credentials
                 $purchaser_api_key = get_user_meta($customer_id, '_monarch_temp_org_api_key', true);
+                if (empty($purchaser_api_key)) {
+                    // Returning user - try permanent credentials
+                    $purchaser_api_key = get_user_meta($customer_id, '_monarch_org_api_key', true);
+                }
                 $purchaser_app_id = get_user_meta($customer_id, '_monarch_temp_org_app_id', true);
+                if (empty($purchaser_app_id)) {
+                    // Returning user - try permanent credentials
+                    $purchaser_app_id = get_user_meta($customer_id, '_monarch_org_app_id', true);
+                }
             }
 
             // Use purchaser credentials if available, otherwise fall back to merchant credentials
@@ -1481,8 +1490,17 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
 
             // IMPORTANT: Use the PURCHASER's API credentials for getLatestPayToken
             // The orgId must be associated with the security headers being used
+            // Check BOTH temp (new registration) AND permanent (returning user) credentials
             $purchaser_api_key = get_user_meta($customer_id, '_monarch_temp_org_api_key', true);
+            if (empty($purchaser_api_key)) {
+                // Returning user - try permanent credentials
+                $purchaser_api_key = get_user_meta($customer_id, '_monarch_org_api_key', true);
+            }
             $purchaser_app_id = get_user_meta($customer_id, '_monarch_temp_org_app_id', true);
+            if (empty($purchaser_app_id)) {
+                // Returning user - try permanent credentials
+                $purchaser_app_id = get_user_meta($customer_id, '_monarch_org_app_id', true);
+            }
 
             // Log credentials being used
             $logger->debug('ajax_get_latest_paytoken called', array(

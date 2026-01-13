@@ -1,6 +1,6 @@
 # Monarch WooCommerce Payment Gateway - Developer Guide
 
-**Version:** 1.0.24
+**Version:** 1.0.25
 **Requires WordPress:** 5.0+
 **Requires WooCommerce:** 5.0+
 **Tested up to:** WordPress 6.4, WooCommerce 8.0
@@ -308,6 +308,13 @@ For plugin-specific issues, check the logs and transaction details in the WordPr
 ---
 
 ## Changelog
+
+### Version 1.0.25
+- **FIXED: Returning customers' getLatestPayToken API stuck on loading**
+- Root cause: `ajax_get_latest_paytoken` and `ajax_check_bank_status` functions were only checking temporary credentials (`_monarch_temp_org_api_key`)
+- Returning users have permanent credentials stored as `_monarch_org_api_key`
+- Now checks BOTH temp and permanent credential storage
+- This fixes the issue where returning customers click "Continue" → Yodlee modal → redirect URL → "I've Connected My Bank Account" button → stuck on loading
 
 ### Version 1.0.24
 - **IMPROVED: Auto-recovery for returning users when bank URL not found**
