@@ -900,141 +900,98 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             ));
 
             if ($user_exists && $found_org_id) {
-                // User already exists - use existing org_id instead of creating new one
-                $logger->debug('SUCCESS: Existing user found by email - will NOT create new organization', array(
+                // User already exists - check if they have a bank linked (paytoken)
+                $logger->debug('Existing user found by email', array(
                     'email' => $user_email,
                     'org_id' => $found_org_id,
-                    'user_id' => $found_user_id,
-                    'full_data_keys' => isset($existing_user['data']) ? array_keys($existing_user['data']) : 'no data',
-                    'full_data' => $existing_user['data'] ?? 'none'
+                    'user_id' => $found_user_id
                 ));
 
-                // Use the found values
                 $org_id = $found_org_id;
                 $user_id = $found_user_id;
 
-                // FIRST: Check if we have a stored bank linking URL from previous registration
-                $bank_linking_url = '';
-                if (!$is_guest) {
-                    $stored_url = get_user_meta($customer_id, '_monarch_bank_linking_url', true);
-                    if (!empty($stored_url)) {
-                        $bank_linking_url = $stored_url;
-                        $logger->debug('Found stored bank linking URL from user meta', array(
-                            'url_length' => strlen($bank_linking_url)
-                        ));
-                    }
-                } else {
-                    $stored_url = WC()->session->get('monarch_bank_linking_url');
-                    if (!empty($stored_url)) {
-                        $bank_linking_url = $stored_url;
-                        $logger->debug('Found stored bank linking URL from session', array(
-                            'url_length' => strlen($bank_linking_url)
-                        ));
-                    }
-                }
+                // Check if user already has a paytoken (bank linked) via /getlatestpaytoken/{orgId}
+                $api_url = $this->testmode ? 'https://devapi.monarch.is/v1' : 'https://api.monarch.is/v1';
+                $paytoken_response = wp_remote_get($api_url . '/getlatestpaytoken/' . $org_id, array(
+                    'headers' => array(
+                        'accept' => 'application/json',
+                        'X-API-KEY' => $this->api_key,
+                        'X-APP-ID' => $this->app_id
+                    ),
+                    'timeout' => 30
+                ));
 
-                // SECOND: Check if the /merchants/verify response has the bank linking URL
-                if (empty($bank_linking_url) && !empty($existing_user['data'])) {
-                    $data = $existing_user['data'];
-                    $bank_linking_url = $data['partner_embedded_url'] ?? $data['bankLinkingUrl'] ?? $data['bank_linking_url'] ??
-                                       $data['connectionUrl'] ?? $data['connection_url'] ?? $data['url'] ??
-                                       $data['embedUrl'] ?? $data['embed_url'] ?? '';
+                $has_paytoken = false;
+                $existing_paytoken_id = null;
 
-                    if (!empty($bank_linking_url)) {
-                        $logger->debug('Found bank linking URL directly in /merchants/verify response', array(
-                            'url' => $bank_linking_url
-                        ));
-                    }
-                }
+                if (!is_wp_error($paytoken_response)) {
+                    $paytoken_status = wp_remote_retrieve_response_code($paytoken_response);
+                    $paytoken_body = json_decode(wp_remote_retrieve_body($paytoken_response), true);
 
-                // THIRD: If no URL yet, try fetching from various endpoints
-                if (empty($bank_linking_url)) {
-                    $bank_linking_url = $this->get_bank_linking_url_for_org($org_id, $logger);
-                }
+                    $logger->debug('Checked for existing paytoken', array(
+                        'status_code' => $paytoken_status,
+                        'response' => $paytoken_body
+                    ));
 
-                // THIRD: If still no URL, try calling create_organization again
-                // Some APIs return the existing org with URL when you try to create with existing email
-                if (empty($bank_linking_url)) {
-                    $logger->debug('No URL found - trying create_organization as fallback for existing user');
-
-                    $retry_result = $monarch_api->create_organization($customer_data);
-
-                    if ($retry_result['success'] && !empty($retry_result['data'])) {
-                        $bank_linking_url = $retry_result['data']['partner_embedded_url'] ??
-                                           $retry_result['data']['bankLinkingUrl'] ??
-                                           $retry_result['data']['connectionUrl'] ?? '';
-
-                        if (!empty($bank_linking_url)) {
-                            $logger->debug('Got URL from create_organization retry', array(
-                                'url' => $bank_linking_url
-                            ));
-                        }
-                    } else {
-                        // Check if the error response contains the URL
-                        $error_data = $retry_result['response'] ?? [];
-                        if (!empty($error_data)) {
-                            $bank_linking_url = $error_data['partner_embedded_url'] ??
-                                               $error_data['bankLinkingUrl'] ??
-                                               $error_data['connectionUrl'] ?? '';
-
-                            if (!empty($bank_linking_url)) {
-                                $logger->debug('Got URL from create_organization error response', array(
-                                    'url' => $bank_linking_url
-                                ));
-                            }
+                    if ($paytoken_status >= 200 && $paytoken_status < 300 && !empty($paytoken_body)) {
+                        $existing_paytoken_id = $paytoken_body['_id'] ?? $paytoken_body['payTokenId'] ?? $paytoken_body['id'] ?? null;
+                        if (!empty($existing_paytoken_id)) {
+                            $has_paytoken = true;
+                            $logger->debug('User has existing paytoken', array('paytoken_id' => $existing_paytoken_id));
                         }
                     }
                 }
 
-                // Final check - if still no URL, try creating a NEW organization
-                // Monarch may allow creating with same email if existing org is inactive/old
-                if (empty($bank_linking_url)) {
-                    $logger->debug('No URL for existing org - attempting to create fresh organization', array(
-                        'existing_org_id' => $org_id,
-                        'email' => $user_email
-                    ));
-
-                    // Clear the stored Monarch data
-                    if (!$is_guest && $customer_id) {
-                        delete_user_meta($customer_id, '_monarch_org_id');
-                        delete_user_meta($customer_id, '_monarch_temp_org_id');
-                        delete_user_meta($customer_id, '_monarch_paytoken_id');
-                        delete_user_meta($customer_id, '_monarch_bank_linking_url');
-                    }
-
-                    // Try creating a NEW organization - this will fall through to the "user not found" flow below
-                    // Reset user_exists flag so we proceed with new org creation
-                    $user_exists = false;
-                    $found_org_id = null;
-
-                    $logger->debug('Reset user_exists flag - will proceed to create new organization');
-                } else {
-                    // We have a valid bank_linking_url - return existing organization
-                    $logger->debug('Using existing organization', array(
-                        'org_id' => $org_id,
-                        'user_id' => $user_id,
-                        'bank_linking_url' => $bank_linking_url
-                    ));
-
-                    // Save organization data
+                if ($has_paytoken) {
+                    // User already has a bank linked - save data and return success
                     if ($is_guest) {
                         WC()->session->set('monarch_temp_org_id', $org_id);
                         WC()->session->set('monarch_temp_user_id', $user_id);
+                        WC()->session->set('monarch_paytoken_id', $existing_paytoken_id);
                     } else {
                         $customer_id = get_current_user_id();
                         update_user_meta($customer_id, '_monarch_temp_org_id', $org_id);
                         update_user_meta($customer_id, '_monarch_temp_user_id', $user_id);
+                        update_user_meta($customer_id, '_monarch_paytoken_id', $existing_paytoken_id);
                     }
 
-                    // Return existing organization data with bank linking URL
                     wp_send_json_success(array(
                         'org_id' => $org_id,
                         'user_id' => $user_id,
-                        'bank_linking_url' => $bank_linking_url,
-                        'existing_user' => true
+                        'paytoken_id' => $existing_paytoken_id,
+                        'existing_user' => true,
+                        'has_bank' => true
                     ));
                     return;
                 }
+
+                // User exists but has no bank linked
+                // The partner_embedded_url is only returned when organization is created
+                // Offer manual bank entry as the solution
+                $logger->debug('User exists but has no paytoken - manual bank entry required', array(
+                    'org_id' => $org_id,
+                    'email' => $user_email
+                ));
+
+                // Save org data so manual bank entry can use it
+                if ($is_guest) {
+                    WC()->session->set('monarch_temp_org_id', $org_id);
+                    WC()->session->set('monarch_temp_user_id', $user_id);
+                } else {
+                    $customer_id = get_current_user_id();
+                    update_user_meta($customer_id, '_monarch_temp_org_id', $org_id);
+                    update_user_meta($customer_id, '_monarch_temp_user_id', $user_id);
+                }
+
+                wp_send_json_success(array(
+                    'org_id' => $org_id,
+                    'user_id' => $user_id,
+                    'existing_user' => true,
+                    'has_bank' => false,
+                    'require_manual_entry' => true,
+                    'message' => 'This email is already registered. Please enter your bank details manually.'
+                ));
+                return;
             }
 
             // STEP 1: Create organization (only if user doesn't exist)
@@ -1048,60 +1005,16 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             $org_result = $monarch_api->create_organization($customer_data);
 
             if (!$org_result['success']) {
-                // Check if the error is "Email already in use" - if so, the user DOES exist
-                // This is a fallback in case /getUserByEmail didn't find them
+                // Check if the error is "Email already in use"
                 $error_msg = strtolower($org_result['error'] ?? '');
                 if (strpos($error_msg, 'email') !== false && (strpos($error_msg, 'already') !== false || strpos($error_msg, 'exists') !== false || strpos($error_msg, 'in use') !== false)) {
-                    $logger->debug('========== FALLBACK: Email exists error caught ==========');
-                    $logger->debug('Organization creation failed with "email exists" error. Attempting to find existing org.', array(
+                    $logger->debug('Organization creation failed - email already exists', array(
                         'email' => $user_email,
                         'error' => $org_result['error']
                     ));
 
-                    // Try to find the existing organization using alternative method
-                    $existing_org = $this->find_organization_by_email($user_email);
-
-                    if ($existing_org && !empty($existing_org['orgId'] ?? $existing_org['_id'] ?? null)) {
-                        $org_id = $existing_org['orgId'] ?? $existing_org['org_id'] ?? null;
-                        $user_id = $existing_org['_id'] ?? $existing_org['userId'] ?? null;
-
-                        $logger->debug('FALLBACK SUCCESS: Found existing organization', array(
-                            'org_id' => $org_id,
-                            'user_id' => $user_id
-                        ));
-
-                        // Get bank linking URL using the comprehensive helper method
-                        $bank_linking_url = $this->get_bank_linking_url_for_org($org_id, $logger);
-
-                        if (!empty($bank_linking_url)) {
-                            // Save and return existing org data
-                            if ($is_guest) {
-                                WC()->session->set('monarch_temp_org_id', $org_id);
-                                WC()->session->set('monarch_temp_user_id', $user_id);
-                            } else {
-                                $customer_id = get_current_user_id();
-                                update_user_meta($customer_id, '_monarch_temp_org_id', $org_id);
-                                update_user_meta($customer_id, '_monarch_temp_user_id', $user_id);
-                            }
-
-                            wp_send_json_success(array(
-                                'org_id' => $org_id,
-                                'user_id' => $user_id,
-                                'bank_linking_url' => $bank_linking_url,
-                                'existing_user' => true,
-                                'found_via_fallback' => true
-                            ));
-                            return;
-                        }
-                    }
-
-                    // If fallback also failed - this email exists in Monarch but we can't get a bank linking URL
-                    // This is a Monarch API limitation - clear data and let them try a different email or contact support
-                    $logger->error('Email exists in Monarch but cannot retrieve bank linking URL - API limitation', array(
-                        'email' => $user_email
-                    ));
-
-                    wp_send_json_error('This email is registered but the bank connection cannot be retrieved. Please try using a different email address, or contact support for assistance.');
+                    // Email exists but wasn't found by lookup - tell user to use manual bank entry
+                    wp_send_json_error('This email is already registered. Please use manual bank entry to link your bank account.');
                     return;
                 }
 
@@ -1948,31 +1861,27 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 $org_result = $monarch_api->create_organization($customer_data);
 
                 if (!$org_result['success']) {
-                    // Check if the error is "Email already in use" - if so, the user DOES exist
-                    // This is a fallback in case /getUserByEmail didn't find them
+                    // Check if the error is "Email already in use"
                     $error_msg = strtolower($org_result['error'] ?? '');
                     if (strpos($error_msg, 'email') !== false && (strpos($error_msg, 'already') !== false || strpos($error_msg, 'exists') !== false || strpos($error_msg, 'in use') !== false)) {
-                        $logger->debug('========== MANUAL ENTRY FALLBACK: Email exists error caught ==========');
-                        $logger->debug('Manual entry: Organization creation failed with "email exists" error. Attempting to find existing org.', array(
+                        $logger->debug('Manual entry: Email exists error - retrying lookup', array(
                             'email' => $user_email,
                             'error' => $org_result['error']
                         ));
 
-                        // Try to find the existing organization
-                        $existing_org = $this->find_organization_by_email($user_email);
-
-                        if ($existing_org && !empty($existing_org['orgId'] ?? $existing_org['_id'] ?? null)) {
-                            $org_id = $existing_org['orgId'] ?? $existing_org['org_id'] ?? null;
-                            $user_id = $existing_org['_id'] ?? $existing_org['userId'] ?? null;
+                        // Retry the email lookup
+                        $retry_lookup = $monarch_api->get_user_by_email($user_email);
+                        if ($retry_lookup['success'] && !empty($retry_lookup['data'])) {
+                            $org_id = $retry_lookup['org_id'] ?? $retry_lookup['data']['orgId'] ?? null;
+                            $user_id = $retry_lookup['data']['_id'] ?? $retry_lookup['data']['userId'] ?? null;
                             $is_existing_user = true;
 
-                            $logger->debug('MANUAL ENTRY FALLBACK SUCCESS: Found existing organization', array(
+                            $logger->debug('Manual entry: Found org on retry', array(
                                 'org_id' => $org_id,
                                 'user_id' => $user_id
                             ));
-                            // Continue to PayToken creation below
                         } else {
-                            wp_send_json_error('This email is already registered. Please use the "Welcome back" option or contact support.');
+                            wp_send_json_error('This email is already registered but could not be found. Please contact support.');
                             return;
                         }
                     } else {
@@ -2272,125 +2181,13 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
     }
 
     /**
-     * Find existing organization by email
-     */
-    private function find_organization_by_email($email) {
-        $api_url = $this->testmode
-            ? 'https://devapi.monarch.is/v1'
-            : 'https://api.monarch.is/v1';
-
-        $logger = WC_Monarch_Logger::instance();
-        $logger->debug('find_organization_by_email called', array('email' => $email));
-
-        // Method 1: Try /merchants/verify/{email} endpoint
-        $verify_response = wp_remote_get($api_url . '/merchants/verify/' . urlencode($email), array(
-            'headers' => array(
-                'accept' => 'application/json',
-                'X-API-KEY' => $this->api_key,
-                'X-APP-ID' => $this->app_id
-            ),
-            'timeout' => 30
-        ));
-
-        if (!is_wp_error($verify_response)) {
-            $status_code = wp_remote_retrieve_response_code($verify_response);
-            $body = json_decode(wp_remote_retrieve_body($verify_response), true);
-
-            $logger->debug('find_organization_by_email: /merchants/verify response', array(
-                'status_code' => $status_code,
-                'body' => $body
-            ));
-
-            if ($status_code >= 200 && $status_code < 300 && !empty($body) && isset($body['orgId'])) {
-                $logger->debug('find_organization_by_email: Found via /merchants/verify', array(
-                    'orgId' => $body['orgId']
-                ));
-                return $body;
-            }
-        }
-
-        // Method 2: Try /getUserByEmail/{email} endpoint (original endpoint)
-        $user_response = wp_remote_get($api_url . '/getUserByEmail/' . urlencode($email), array(
-            'headers' => array(
-                'accept' => 'application/json',
-                'X-API-KEY' => $this->api_key,
-                'X-APP-ID' => $this->app_id
-            ),
-            'timeout' => 30
-        ));
-
-        if (!is_wp_error($user_response)) {
-            $status_code = wp_remote_retrieve_response_code($user_response);
-            $body = json_decode(wp_remote_retrieve_body($user_response), true);
-
-            $logger->debug('find_organization_by_email: /getUserByEmail response', array(
-                'status_code' => $status_code,
-                'body' => $body
-            ));
-
-            if ($status_code >= 200 && $status_code < 300 && !empty($body)) {
-                $org_id = $body['orgId'] ?? $body['org_id'] ?? null;
-                if ($org_id) {
-                    $logger->debug('find_organization_by_email: Found via /getUserByEmail', array(
-                        'orgId' => $org_id
-                    ));
-                    return $body;
-                }
-            }
-        }
-
-        // Method 3: Try /organization?email={email} endpoint
-        $response = wp_remote_get($api_url . '/organization?email=' . urlencode($email), array(
-            'headers' => array(
-                'accept' => 'application/json',
-                'X-API-KEY' => $this->api_key,
-                'X-APP-ID' => $this->app_id
-            ),
-            'timeout' => 30
-        ));
-
-        if (!is_wp_error($response)) {
-            $status_code = wp_remote_retrieve_response_code($response);
-            $body = json_decode(wp_remote_retrieve_body($response), true);
-
-            $logger->debug('find_organization_by_email: /organization?email response', array(
-                'status_code' => $status_code,
-                'body' => $body
-            ));
-
-            if ($status_code >= 200 && $status_code < 300 && !empty($body)) {
-                // Return first matching organization
-                if (is_array($body) && isset($body[0])) {
-                    $logger->debug('find_organization_by_email: Found via /organization (array)', array(
-                        'orgId' => $body[0]['orgId'] ?? 'unknown'
-                    ));
-                    return $body[0];
-                }
-                // If single object returned
-                if (isset($body['orgId']) || isset($body['_id'])) {
-                    $logger->debug('find_organization_by_email: Found via /organization (object)', array(
-                        'orgId' => $body['orgId'] ?? $body['_id'] ?? 'unknown'
-                    ));
-                    return $body;
-                }
-            }
-        }
-
-        $logger->debug('find_organization_by_email: No organization found by any method', array('email' => $email));
-        return null;
-    }
-
-    /**
      * Recursively search for orgId in a nested array/response
-     * This handles cases where Monarch returns orgId in unexpected locations
      */
     private function find_org_id_recursive($data, $depth = 0) {
-        // Prevent infinite recursion
         if ($depth > 5 || !is_array($data)) {
             return null;
         }
 
-        // Direct keys to check
         $org_id_keys = array('orgId', 'org_id', 'organizationId', 'organization_id');
 
         foreach ($org_id_keys as $key) {
@@ -2399,7 +2196,6 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             }
         }
 
-        // Recursively check nested arrays
         foreach ($data as $key => $value) {
             if (is_array($value)) {
                 $found = $this->find_org_id_recursive($value, $depth + 1);
@@ -2410,383 +2206,5 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
         }
 
         return null;
-    }
-
-    /**
-     * Get bank linking URL for an existing organization
-     * Tries multiple endpoints to find the URL
-     *
-     * @param string $org_id The organization ID
-     * @param WC_Monarch_Logger $logger Logger instance
-     * @return string The bank linking URL or empty string if not found
-     */
-    private function get_bank_linking_url_for_org($org_id, $logger = null, $api_key = null, $app_id = null) {
-        if (!$logger) {
-            $logger = WC_Monarch_Logger::instance();
-        }
-
-        $api_url = $this->testmode ? 'https://devapi.monarch.is/v1' : 'https://api.monarch.is/v1';
-        $bank_linking_url = '';
-
-        // Use provided credentials or fall back to merchant credentials
-        $use_api_key = $api_key ?: $this->api_key;
-        $use_app_id = $app_id ?: $this->app_id;
-
-        $headers = array(
-            'X-API-KEY' => $use_api_key,
-            'X-APP-ID' => $use_app_id,
-            'accept' => 'application/json'
-        );
-
-        // List of possible URL field names in the response
-        $url_fields = array(
-            'partner_embedded_url',
-            'bankLinkingUrl',
-            'bank_linking_url',
-            'connectionUrl',
-            'connection_url',
-            'url',
-            'embedUrl',
-            'embed_url',
-            'yodleeUrl',
-            'plaidUrl'
-        );
-
-        $logger->debug('get_bank_linking_url_for_org: Starting URL lookup', array('org_id' => $org_id));
-
-        // Method 1: Try /partner/embedded/{org_id}
-        $embed_response = wp_remote_get($api_url . '/partner/embedded/' . $org_id, array(
-            'headers' => $headers,
-            'timeout' => 30
-        ));
-
-        if (!is_wp_error($embed_response)) {
-            $status_code = wp_remote_retrieve_response_code($embed_response);
-            $embed_body = json_decode(wp_remote_retrieve_body($embed_response), true);
-
-            $logger->debug('get_bank_linking_url_for_org: /partner/embedded response', array(
-                'status_code' => $status_code,
-                'body' => $embed_body
-            ));
-
-            if ($status_code >= 200 && $status_code < 300 && !empty($embed_body)) {
-                foreach ($url_fields as $field) {
-                    if (!empty($embed_body[$field])) {
-                        $bank_linking_url = $embed_body[$field];
-                        $logger->debug('get_bank_linking_url_for_org: Found URL via /partner/embedded', array(
-                            'field' => $field,
-                            'url' => $bank_linking_url
-                        ));
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Method 2: Try /organization/{org_id}
-        if (empty($bank_linking_url)) {
-            $org_response = wp_remote_get($api_url . '/organization/' . $org_id, array(
-                'headers' => $headers,
-                'timeout' => 30
-            ));
-
-            if (!is_wp_error($org_response)) {
-                $status_code = wp_remote_retrieve_response_code($org_response);
-                $org_body = json_decode(wp_remote_retrieve_body($org_response), true);
-
-                $logger->debug('get_bank_linking_url_for_org: /organization response', array(
-                    'status_code' => $status_code,
-                    'body' => $org_body
-                ));
-
-                if ($status_code >= 200 && $status_code < 300 && !empty($org_body)) {
-                    foreach ($url_fields as $field) {
-                        if (!empty($org_body[$field])) {
-                            $bank_linking_url = $org_body[$field];
-                            $logger->debug('get_bank_linking_url_for_org: Found URL via /organization', array(
-                                'field' => $field,
-                                'url' => $bank_linking_url
-                            ));
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Method 3: Try /organization/embedded/{org_id}
-        if (empty($bank_linking_url)) {
-            $org_embed_response = wp_remote_get($api_url . '/organization/embedded/' . $org_id, array(
-                'headers' => $headers,
-                'timeout' => 30
-            ));
-
-            if (!is_wp_error($org_embed_response)) {
-                $status_code = wp_remote_retrieve_response_code($org_embed_response);
-                $org_embed_body = json_decode(wp_remote_retrieve_body($org_embed_response), true);
-
-                $logger->debug('get_bank_linking_url_for_org: /organization/embedded response', array(
-                    'status_code' => $status_code,
-                    'body' => $org_embed_body
-                ));
-
-                if ($status_code >= 200 && $status_code < 300 && !empty($org_embed_body)) {
-                    foreach ($url_fields as $field) {
-                        if (!empty($org_embed_body[$field])) {
-                            $bank_linking_url = $org_embed_body[$field];
-                            $logger->debug('get_bank_linking_url_for_org: Found URL via /organization/embedded', array(
-                                'field' => $field,
-                                'url' => $bank_linking_url
-                            ));
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Method 4: Try POST /partner/embedded with org_id in body
-        if (empty($bank_linking_url)) {
-            $post_response = wp_remote_post($api_url . '/partner/embedded', array(
-                'headers' => array_merge($headers, array('Content-Type' => 'application/json')),
-                'body' => json_encode(array('orgId' => $org_id)),
-                'timeout' => 30
-            ));
-
-            if (!is_wp_error($post_response)) {
-                $status_code = wp_remote_retrieve_response_code($post_response);
-                $post_body = json_decode(wp_remote_retrieve_body($post_response), true);
-
-                $logger->debug('get_bank_linking_url_for_org: POST /partner/embedded response', array(
-                    'status_code' => $status_code,
-                    'body' => $post_body
-                ));
-
-                if ($status_code >= 200 && $status_code < 300 && !empty($post_body)) {
-                    foreach ($url_fields as $field) {
-                        if (!empty($post_body[$field])) {
-                            $bank_linking_url = $post_body[$field];
-                            $logger->debug('get_bank_linking_url_for_org: Found URL via POST /partner/embedded', array(
-                                'field' => $field,
-                                'url' => $bank_linking_url
-                            ));
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Method 5: Try POST /organization/embedded with full data
-        if (empty($bank_linking_url)) {
-            $post_org_embed = wp_remote_post($api_url . '/organization/embedded', array(
-                'headers' => array_merge($headers, array('Content-Type' => 'application/json')),
-                'body' => json_encode(array(
-                    'orgId' => $org_id,
-                    'partnerName' => $this->partner_name,
-                    'merchantOrgId' => $this->merchant_org_id
-                )),
-                'timeout' => 30
-            ));
-
-            if (!is_wp_error($post_org_embed)) {
-                $status_code = wp_remote_retrieve_response_code($post_org_embed);
-                $post_org_body = json_decode(wp_remote_retrieve_body($post_org_embed), true);
-
-                $logger->debug('get_bank_linking_url_for_org: POST /organization/embedded response', array(
-                    'status_code' => $status_code,
-                    'body' => $post_org_body
-                ));
-
-                if ($status_code >= 200 && $status_code < 300 && !empty($post_org_body)) {
-                    foreach ($url_fields as $field) {
-                        if (!empty($post_org_body[$field])) {
-                            $bank_linking_url = $post_org_body[$field];
-                            $logger->debug('get_bank_linking_url_for_org: Found URL via POST /organization/embedded', array(
-                                'field' => $field,
-                                'url' => $bank_linking_url
-                            ));
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Method 6: Try GET /embedded/{org_id} (simpler endpoint)
-        if (empty($bank_linking_url)) {
-            $simple_embed = wp_remote_get($api_url . '/embedded/' . $org_id, array(
-                'headers' => $headers,
-                'timeout' => 30
-            ));
-
-            if (!is_wp_error($simple_embed)) {
-                $status_code = wp_remote_retrieve_response_code($simple_embed);
-                $simple_body = json_decode(wp_remote_retrieve_body($simple_embed), true);
-
-                $logger->debug('get_bank_linking_url_for_org: GET /embedded response', array(
-                    'status_code' => $status_code,
-                    'body' => $simple_body
-                ));
-
-                if ($status_code >= 200 && $status_code < 300 && !empty($simple_body)) {
-                    foreach ($url_fields as $field) {
-                        if (!empty($simple_body[$field])) {
-                            $bank_linking_url = $simple_body[$field];
-                            $logger->debug('get_bank_linking_url_for_org: Found URL via GET /embedded', array(
-                                'field' => $field,
-                                'url' => $bank_linking_url
-                            ));
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Method 7: Try POST /embedded with org_id
-        if (empty($bank_linking_url)) {
-            $post_simple = wp_remote_post($api_url . '/embedded', array(
-                'headers' => array_merge($headers, array('Content-Type' => 'application/json')),
-                'body' => json_encode(array(
-                    'orgId' => $org_id,
-                    'organizationId' => $org_id
-                )),
-                'timeout' => 30
-            ));
-
-            if (!is_wp_error($post_simple)) {
-                $status_code = wp_remote_retrieve_response_code($post_simple);
-                $post_simple_body = json_decode(wp_remote_retrieve_body($post_simple), true);
-
-                $logger->debug('get_bank_linking_url_for_org: POST /embedded response', array(
-                    'status_code' => $status_code,
-                    'body' => $post_simple_body
-                ));
-
-                if ($status_code >= 200 && $status_code < 300 && !empty($post_simple_body)) {
-                    foreach ($url_fields as $field) {
-                        if (!empty($post_simple_body[$field])) {
-                            $bank_linking_url = $post_simple_body[$field];
-                            $logger->debug('get_bank_linking_url_for_org: Found URL via POST /embedded', array(
-                                'field' => $field,
-                                'url' => $bank_linking_url
-                            ));
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Method 8: Try PUT /organization/{org_id} to refresh/regenerate embedded URL
-        if (empty($bank_linking_url)) {
-            $put_org = wp_remote_request($api_url . '/organization/' . $org_id, array(
-                'method' => 'PUT',
-                'headers' => array_merge($headers, array('Content-Type' => 'application/json')),
-                'body' => json_encode(array(
-                    'orgId' => $org_id,
-                    'partnerName' => $this->partner_name,
-                    'refreshEmbedded' => true
-                )),
-                'timeout' => 30
-            ));
-
-            if (!is_wp_error($put_org)) {
-                $status_code = wp_remote_retrieve_response_code($put_org);
-                $put_org_body = json_decode(wp_remote_retrieve_body($put_org), true);
-
-                $logger->debug('get_bank_linking_url_for_org: PUT /organization response', array(
-                    'status_code' => $status_code,
-                    'body' => $put_org_body
-                ));
-
-                if ($status_code >= 200 && $status_code < 300 && !empty($put_org_body)) {
-                    foreach ($url_fields as $field) {
-                        if (!empty($put_org_body[$field])) {
-                            $bank_linking_url = $put_org_body[$field];
-                            $logger->debug('get_bank_linking_url_for_org: Found URL via PUT /organization', array(
-                                'field' => $field,
-                                'url' => $bank_linking_url
-                            ));
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Method 9: Try POST /partner/embedded/refresh with org_id
-        if (empty($bank_linking_url)) {
-            $refresh_embed = wp_remote_post($api_url . '/partner/embedded/refresh', array(
-                'headers' => array_merge($headers, array('Content-Type' => 'application/json')),
-                'body' => json_encode(array(
-                    'orgId' => $org_id,
-                    'organizationId' => $org_id
-                )),
-                'timeout' => 30
-            ));
-
-            if (!is_wp_error($refresh_embed)) {
-                $status_code = wp_remote_retrieve_response_code($refresh_embed);
-                $refresh_body = json_decode(wp_remote_retrieve_body($refresh_embed), true);
-
-                $logger->debug('get_bank_linking_url_for_org: POST /partner/embedded/refresh response', array(
-                    'status_code' => $status_code,
-                    'body' => $refresh_body
-                ));
-
-                if ($status_code >= 200 && $status_code < 300 && !empty($refresh_body)) {
-                    foreach ($url_fields as $field) {
-                        if (!empty($refresh_body[$field])) {
-                            $bank_linking_url = $refresh_body[$field];
-                            $logger->debug('get_bank_linking_url_for_org: Found URL via POST /partner/embedded/refresh', array(
-                                'field' => $field,
-                                'url' => $bank_linking_url
-                            ));
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Method 10: Try POST /organization/refresh/{org_id}
-        if (empty($bank_linking_url)) {
-            $org_refresh = wp_remote_post($api_url . '/organization/refresh/' . $org_id, array(
-                'headers' => array_merge($headers, array('Content-Type' => 'application/json')),
-                'body' => json_encode(array('partnerName' => $this->partner_name)),
-                'timeout' => 30
-            ));
-
-            if (!is_wp_error($org_refresh)) {
-                $status_code = wp_remote_retrieve_response_code($org_refresh);
-                $org_refresh_body = json_decode(wp_remote_retrieve_body($org_refresh), true);
-
-                $logger->debug('get_bank_linking_url_for_org: POST /organization/refresh response', array(
-                    'status_code' => $status_code,
-                    'body' => $org_refresh_body
-                ));
-
-                if ($status_code >= 200 && $status_code < 300 && !empty($org_refresh_body)) {
-                    foreach ($url_fields as $field) {
-                        if (!empty($org_refresh_body[$field])) {
-                            $bank_linking_url = $org_refresh_body[$field];
-                            $logger->debug('get_bank_linking_url_for_org: Found URL via POST /organization/refresh', array(
-                                'field' => $field,
-                                'url' => $bank_linking_url
-                            ));
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        if (empty($bank_linking_url)) {
-            $logger->error('get_bank_linking_url_for_org: No URL found by any method (tried 10 endpoints)', array('org_id' => $org_id));
-        }
-
-        return $bank_linking_url;
     }
 }
