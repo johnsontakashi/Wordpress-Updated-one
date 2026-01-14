@@ -637,13 +637,13 @@ jQuery(document).ready(function($) {
         retryCount = retryCount || 0;
         isExistingUser = isExistingUser || false;
 
-        // For existing users, don't retry - they already have a bank connected
-        const maxRetries = isExistingUser ? 0 : 5;
+        // Always allow retries - user may have just linked their bank in the iframe
+        const maxRetries = 5;
         const retryDelay = 3000; // 3 seconds between retries (bank linking can take time)
 
-        console.log('Checking bank connection status for org:', orgId, '(attempt', retryCount + 1, 'of', maxRetries + 1, ', isExistingUser:', isExistingUser, ')');
+        console.log('Checking bank connection status for org:', orgId, '(attempt', retryCount + 1, 'of', maxRetries + 1, ')');
 
-        $('#monarch-bank-connected-btn').text('Verifying...' + (retryCount > 0 && !isExistingUser ? ' (Attempt ' + (retryCount + 1) + ')' : ''));
+        $('#monarch-bank-connected-btn').text('Verifying...' + (retryCount > 0 ? ' (Attempt ' + (retryCount + 1) + ')' : ''));
 
         $.ajax({
             url: monarch_ach_params.ajax_url,
@@ -675,20 +675,9 @@ jQuery(document).ready(function($) {
                             checkBankConnectionStatus(orgId, retryCount + 1, isExistingUser);
                         }, retryDelay);
                     } else {
-                        // Max retries reached - show detailed error
+                        // Max retries reached - show error
                         console.error('Max retries reached. Error details:', errorMsg);
-                        var errorDetails = isExistingUser
-                            ? 'Unable to verify bank connection. Please try refreshing the page.\n\nTechnical details: ' + errorMsg
-                            : 'Bank connection not detected after ' + (maxRetries + 1) + ' attempts.\n\n' +
-                              'Possible reasons:\n' +
-                              '1. Bank linking was not completed in the iframe\n' +
-                              '2. The PayToken is still being processed\n' +
-                              '3. There may be a credentials mismatch\n\n' +
-                              'Technical details: ' + errorMsg + '\n\n' +
-                              'Please try:\n' +
-                              '- Using the "Manual Entry" option instead\n' +
-                              '- Refreshing the page and trying again';
-                        alert(errorDetails);
+                        alert('Bank connection not detected. Please complete the bank linking in the window above, then click the button again.\n\nIf you continue to see this error, try using "Manual Entry" instead.');
                         $('#monarch-bank-connected-btn').prop('disabled', false).text('I\'ve Connected My Bank');
                     }
                 }
