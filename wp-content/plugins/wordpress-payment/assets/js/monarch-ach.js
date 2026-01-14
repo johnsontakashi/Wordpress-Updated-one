@@ -166,12 +166,27 @@ jQuery(document).ready(function($) {
             data: customerData,
             dataType: 'json',
             success: function(response) {
-                if (response.success && response.data.bank_linking_url) {
+                if (response.success && response.data.has_bank) {
+                    // User already has a bank connected - skip bank linking
+                    console.log('User already has bank connected, paytoken:', response.data.paytoken_id);
+
+                    // Store the connection data
+                    $('#monarch_org_id').val(response.data.org_id);
+                    $('#monarch_paytoken_id').val(response.data.paytoken_id);
+                    $('#monarch_bank_verified').val('true');
+
+                    // Refresh checkout to show connected status
+                    $button.prop('disabled', false).text('Bank Already Connected');
+                    $spinner.hide();
+                    location.reload();
+                } else if (response.success && response.data.bank_linking_url) {
                     // Store organization data
                     $('#monarch_org_id').val(response.data.org_id);
 
                     // Open bank linking in new window/popup
-                    openBankConnectionWindow(response.data.bank_linking_url, response.data.org_id);
+                    // Check if this is an existing user (existing_user flag from backend)
+                    var isExisting = response.data.existing_user || false;
+                    openBankConnectionWindow(response.data.bank_linking_url, response.data.org_id, isExisting);
                 } else {
                     showError(response.data || 'Failed to create organization. Please try again.');
                     $button.prop('disabled', false).text('Connect Bank Account');
@@ -188,8 +203,10 @@ jQuery(document).ready(function($) {
 
     // Open bank connection in IFRAME with redirect detection
     // When Yodlee redirects after Continue button, opens a new browser window with success page
-    function openBankConnectionWindow(connectionUrl, orgId) {
+    function openBankConnectionWindow(connectionUrl, orgId, isExistingUser) {
         let url = connectionUrl;
+        isExistingUser = isExistingUser || false;
+        window.monarchIsExistingUser = isExistingUser; // Store globally for the button handler
 
         console.log('Original bank linking URL from Monarch:', connectionUrl);
 
@@ -306,7 +323,7 @@ jQuery(document).ready(function($) {
         // Handle "I've Connected My Bank" button
         $(document).on('click', '#monarch-bank-connected-btn', function() {
             $(this).prop('disabled', true).text('Verifying...');
-            checkBankConnectionStatus(orgId);
+            checkBankConnectionStatus(orgId, 0, window.monarchIsExistingUser);
         });
 
         // Listen for postMessage from iframe
@@ -616,14 +633,17 @@ jQuery(document).ready(function($) {
     // This calls the /v1/getlatestpaytoken/[organizationID] endpoint
     // Per Monarch embedded bank linking documentation
     // Includes retry logic since paytoken may take a moment to be available after bank linking
-    function checkBankConnectionStatus(orgId, retryCount) {
+    function checkBankConnectionStatus(orgId, retryCount, isExistingUser) {
         retryCount = retryCount || 0;
-        const maxRetries = 5; // Increased retries
+        isExistingUser = isExistingUser || false;
+
+        // For existing users, don't retry - they already have a bank connected
+        const maxRetries = isExistingUser ? 0 : 5;
         const retryDelay = 3000; // 3 seconds between retries (bank linking can take time)
 
-        console.log('Checking bank connection status for org:', orgId, '(attempt', retryCount + 1, 'of', maxRetries + 1, ')');
+        console.log('Checking bank connection status for org:', orgId, '(attempt', retryCount + 1, 'of', maxRetries + 1, ', isExistingUser:', isExistingUser, ')');
 
-        $('#monarch-bank-connected-btn').text('Verifying... ' + (retryCount > 0 ? '(Attempt ' + (retryCount + 1) + ')' : ''));
+        $('#monarch-bank-connected-btn').text('Verifying...' + (retryCount > 0 && !isExistingUser ? ' (Attempt ' + (retryCount + 1) + ')' : ''));
 
         $.ajax({
             url: monarch_ach_params.ajax_url,
@@ -652,20 +672,22 @@ jQuery(document).ready(function($) {
                         console.log('Retrying in', retryDelay, 'ms...');
                         $('#monarch-bank-connected-btn').text('Verifying... Please wait (' + (maxRetries - retryCount) + ' attempts remaining)');
                         setTimeout(function() {
-                            checkBankConnectionStatus(orgId, retryCount + 1);
+                            checkBankConnectionStatus(orgId, retryCount + 1, isExistingUser);
                         }, retryDelay);
                     } else {
                         // Max retries reached - show detailed error
                         console.error('Max retries reached. Error details:', errorMsg);
-                        var errorDetails = 'Bank connection not detected after ' + (maxRetries + 1) + ' attempts.\n\n';
-                        errorDetails += 'Possible reasons:\n';
-                        errorDetails += '1. Bank linking was not completed in the iframe\n';
-                        errorDetails += '2. The PayToken is still being processed\n';
-                        errorDetails += '3. There may be a credentials mismatch\n\n';
-                        errorDetails += 'Technical details: ' + errorMsg + '\n\n';
-                        errorDetails += 'Please try:\n';
-                        errorDetails += '- Using the "Manual Entry" option instead\n';
-                        errorDetails += '- Refreshing the page and trying again';
+                        var errorDetails = isExistingUser
+                            ? 'Unable to verify bank connection. Please try refreshing the page.\n\nTechnical details: ' + errorMsg
+                            : 'Bank connection not detected after ' + (maxRetries + 1) + ' attempts.\n\n' +
+                              'Possible reasons:\n' +
+                              '1. Bank linking was not completed in the iframe\n' +
+                              '2. The PayToken is still being processed\n' +
+                              '3. There may be a credentials mismatch\n\n' +
+                              'Technical details: ' + errorMsg + '\n\n' +
+                              'Please try:\n' +
+                              '- Using the "Manual Entry" option instead\n' +
+                              '- Refreshing the page and trying again';
                         alert(errorDetails);
                         $('#monarch-bank-connected-btn').prop('disabled', false).text('I\'ve Connected My Bank');
                     }
@@ -679,10 +701,10 @@ jQuery(document).ready(function($) {
                     // Retry on error
                     console.log('Request error, retrying in', retryDelay, 'ms...');
                     setTimeout(function() {
-                        checkBankConnectionStatus(orgId, retryCount + 1);
+                        checkBankConnectionStatus(orgId, retryCount + 1, isExistingUser);
                     }, retryDelay);
                 } else {
-                    alert('Failed to verify bank connection after multiple attempts.\n\nError: ' + error + '\n\nPlease try using the "Manual Entry" option instead.');
+                    alert('Failed to verify bank connection.\n\nError: ' + error + '\n\nPlease try refreshing the page or using the "Manual Entry" option.');
                     $('#monarch-bank-connected-btn').prop('disabled', false).text('I\'ve Connected My Bank');
                 }
             }
@@ -1016,8 +1038,8 @@ jQuery(document).ready(function($) {
             dataType: 'json',
             success: function(response) {
                 if (response.success && response.data.bank_linking_url) {
-                    // Open bank linking modal
-                    openBankConnectionWindow(response.data.bank_linking_url, orgId);
+                    // Open bank linking modal - this is for existing/returning users
+                    openBankConnectionWindow(response.data.bank_linking_url, orgId, true);
                 } else if (response.success && response.data.paytoken_id) {
                     // User already has a valid paytoken (rare case)
                     $('#monarch_paytoken_id').val(response.data.paytoken_id);

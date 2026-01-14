@@ -922,22 +922,74 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 return;
             }
 
+            // Check if user already has a paytoken (bank already connected)
+            $api_url = $this->testmode ? 'https://devapi.monarch.is/v1' : 'https://api.monarch.is/v1';
+            $paytoken_response = wp_remote_get($api_url . '/getlatestpaytoken/' . $org_id, array(
+                'headers' => array(
+                    'accept' => 'application/json',
+                    'X-API-KEY' => $this->api_key,
+                    'X-APP-ID' => $this->app_id
+                ),
+                'timeout' => 30
+            ));
+
+            $existing_paytoken_id = null;
+            if (!is_wp_error($paytoken_response)) {
+                $paytoken_status = wp_remote_retrieve_response_code($paytoken_response);
+                $paytoken_body = json_decode(wp_remote_retrieve_body($paytoken_response), true);
+
+                if ($paytoken_status >= 200 && $paytoken_status < 300 && !empty($paytoken_body)) {
+                    $existing_paytoken_id = $paytoken_body['_id'] ?? $paytoken_body['payToken'] ?? $paytoken_body['payTokenId'] ?? null;
+                }
+
+                $logger->debug('Checked for existing paytoken', array(
+                    'org_id' => $org_id,
+                    'status_code' => $paytoken_status,
+                    'has_paytoken' => !empty($existing_paytoken_id),
+                    'paytoken_id' => $existing_paytoken_id
+                ));
+            }
+
             // Save org data
             if ($is_guest) {
                 WC()->session->set('monarch_temp_org_id', $org_id);
                 WC()->session->set('monarch_temp_user_id', $user_id);
+                if ($existing_paytoken_id) {
+                    WC()->session->set('monarch_paytoken_id', $existing_paytoken_id);
+                }
             } else {
                 $customer_id = get_current_user_id();
                 update_user_meta($customer_id, '_monarch_temp_org_id', $org_id);
                 update_user_meta($customer_id, '_monarch_temp_user_id', $user_id);
+                if ($existing_paytoken_id) {
+                    update_user_meta($customer_id, '_monarch_paytoken_id', $existing_paytoken_id);
+                }
             }
 
-            // Return existing user with bank linking URL
+            // If user already has a paytoken, skip bank linking
+            if ($existing_paytoken_id) {
+                $logger->debug('User already has bank connected - skipping bank linking', array(
+                    'org_id' => $org_id,
+                    'paytoken_id' => $existing_paytoken_id
+                ));
+
+                wp_send_json_success(array(
+                    'org_id' => $org_id,
+                    'user_id' => $user_id,
+                    'paytoken_id' => $existing_paytoken_id,
+                    'existing_user' => true,
+                    'has_bank' => true
+                ));
+                return;
+            }
+
+            // User exists but no bank connected - return bank linking URL
             wp_send_json_success(array(
                 'org_id' => $org_id,
                 'user_id' => $user_id,
                 'bank_linking_url' => $bank_linking_url,
-                'existing_user' => true
+                'existing_user' => true,
+                'has_bank' => false
             ));
 
         } catch (Exception $e) {
