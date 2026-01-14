@@ -964,6 +964,26 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                     'decoded_body' => $paytoken_body
                 ));
 
+                // Check for credentials mismatch error
+                $error_message = $paytoken_body['error']['message'] ?? $paytoken_body['error'] ?? '';
+                if (is_array($error_message)) {
+                    $error_message = $error_message['message'] ?? '';
+                }
+
+                if (strpos(strtolower($error_message), 'invalid request headers') !== false) {
+                    // This org was created under different merchant credentials
+                    // The email exists in Monarch but under a different merchant
+                    // We cannot access it - inform the user
+                    $logger->error('Org credentials mismatch - org belongs to different merchant', array(
+                        'org_id' => $org_id,
+                        'error' => $error_message,
+                        'current_merchant_api_key_last_4' => substr($this->api_key, -4)
+                    ));
+
+                    wp_send_json_error('This email is already registered with a different payment provider configuration. Please contact support or use a different email address.');
+                    return;
+                }
+
                 if ($paytoken_status >= 200 && $paytoken_status < 300 && !empty($paytoken_body)) {
                     // Check multiple possible field names for paytoken ID
                     $existing_paytoken_id = $paytoken_body['_id']
@@ -1335,6 +1355,48 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                     'status_code' => $status_code,
                     'full_response' => $result
                 ));
+
+                // Check if this is an "Invalid request headers for this org_Id" error
+                // This means the org was created under different merchant credentials
+                // IMPORTANT: Only trigger refresh_required for EXISTING users (where org_id is stored permanently)
+                // For NEW users (only temp_org_id exists), this is likely just a timing issue
+                if (strpos(strtolower($error_message), 'invalid request headers') !== false) {
+                    // Check if this is an existing user (has permanent org_id) vs new user (only temp_org_id)
+                    $stored_org_id = $customer_id ? get_user_meta($customer_id, '_monarch_org_id', true) : '';
+                    $temp_org_id = $customer_id ? get_user_meta($customer_id, '_monarch_temp_org_id', true) : '';
+                    $is_new_user = empty($stored_org_id) && !empty($temp_org_id);
+
+                    if ($is_new_user) {
+                        // For NEW users, this org was JUST created with current credentials
+                        // The error is likely a timing issue or transient API error
+                        // Let the retry logic handle it instead of clearing data
+                        $logger->debug('Invalid headers error for NEW user - treating as timing issue', array(
+                            'org_id' => $org_id,
+                            'error' => $error_message,
+                            'is_new_user' => true
+                        ));
+                        wp_send_json_error('PayToken not found. Bank linking may not be complete yet.');
+                        return;
+                    }
+
+                    // For EXISTING users, this is a genuine credentials mismatch
+                    $logger->error('Org credentials mismatch - clearing user data for re-registration', array(
+                        'org_id' => $org_id,
+                        'error' => $error_message
+                    ));
+
+                    // Clear the user's stored data so they can re-register
+                    if ($customer_id) {
+                        $this->clear_user_monarch_data($customer_id);
+                    }
+
+                    wp_send_json_error(array(
+                        'message' => 'Your account needs to be reconnected. Please refresh the page and connect your bank again.',
+                        'action' => 'refresh_required',
+                        'cleared' => true
+                    ));
+                    return;
+                }
 
                 // 404 typically means no paytoken exists yet
                 if ($status_code == 404 || strpos(strtolower($error_message), 'not found') !== false) {

@@ -662,8 +662,16 @@ jQuery(document).ready(function($) {
                     console.log('Bank linked successfully, paytoken:', response.data.paytoken_id);
                     completeBankConnection(response.data.paytoken_id);
                 } else {
+                    // Check if this is a credentials mismatch that requires refresh
+                    if (response.data && response.data.action === 'refresh_required') {
+                        alert('Your account needs to be reconnected. The page will refresh so you can connect your bank again.');
+                        $('#bank-connection-modal').remove();
+                        location.reload();
+                        return;
+                    }
+
                     // PayToken not found - might need to retry
-                    var errorMsg = response.data || 'PayToken not found';
+                    var errorMsg = (response.data && response.data.message) ? response.data.message : (response.data || 'PayToken not found');
                     console.log('PayToken not found:', errorMsg);
                     console.log('Full response object:', JSON.stringify(response, null, 2));
 
