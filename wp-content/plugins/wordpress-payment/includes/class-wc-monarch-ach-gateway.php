@@ -857,20 +857,42 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 $org_id = $org_result['data']['orgId'];
                 $bank_linking_url = $org_result['data']['partner_embedded_url'] ?? '';
 
+                // Check if response includes purchaser-specific API credentials
+                // These credentials MUST be used for subsequent API calls like getlatestpaytoken
+                $org_api_key = null;
+                $org_app_id = null;
+                if (isset($org_result['data']['api'])) {
+                    $credentials_key = $this->testmode ? 'sandbox' : 'prod';
+                    $org_credentials = $org_result['data']['api'][$credentials_key] ?? null;
+                    if ($org_credentials) {
+                        $org_api_key = $org_credentials['api_key'] ?? null;
+                        $org_app_id = $org_credentials['app_id'] ?? null;
+                    }
+                }
+
                 $logger->debug('New organization created', array(
                     'org_id' => $org_id,
                     'user_id' => $user_id,
-                    'has_bank_linking_url' => !empty($bank_linking_url)
+                    'has_bank_linking_url' => !empty($bank_linking_url),
+                    'has_purchaser_credentials' => !empty($org_api_key)
                 ));
 
-                // Save org data
+                // Save org data including purchaser credentials for getlatestpaytoken
                 if ($is_guest) {
                     WC()->session->set('monarch_temp_org_id', $org_id);
                     WC()->session->set('monarch_temp_user_id', $user_id);
+                    if ($org_api_key) {
+                        WC()->session->set('monarch_temp_org_api_key', $org_api_key);
+                        WC()->session->set('monarch_temp_org_app_id', $org_app_id);
+                    }
                 } else {
                     $customer_id = get_current_user_id();
                     update_user_meta($customer_id, '_monarch_temp_org_id', $org_id);
                     update_user_meta($customer_id, '_monarch_temp_user_id', $user_id);
+                    if ($org_api_key) {
+                        update_user_meta($customer_id, '_monarch_temp_org_api_key', $org_api_key);
+                        update_user_meta($customer_id, '_monarch_temp_org_app_id', $org_app_id);
+                    }
                 }
 
                 wp_send_json_success(array(
@@ -942,76 +964,84 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             // SECOND: If no stored paytoken, check via API
             if (empty($existing_paytoken_id)) {
                 $api_url = $this->testmode ? 'https://devapi.monarch.is/v1' : 'https://api.monarch.is/v1';
-            $paytoken_response = wp_remote_get($api_url . '/getlatestpaytoken/' . $org_id, array(
-                'headers' => array(
-                    'accept' => 'application/json',
-                    'X-API-KEY' => $this->api_key,
-                    'X-APP-ID' => $this->app_id
-                ),
-                'timeout' => 30
-            ));
-
-            $existing_paytoken_id = null;
-            if (!is_wp_error($paytoken_response)) {
-                $paytoken_status = wp_remote_retrieve_response_code($paytoken_response);
-                $paytoken_raw_body = wp_remote_retrieve_body($paytoken_response);
-                $paytoken_body = json_decode($paytoken_raw_body, true);
-
-                $logger->debug('getlatestpaytoken API response for existing user', array(
-                    'org_id' => $org_id,
-                    'status_code' => $paytoken_status,
-                    'raw_body' => $paytoken_raw_body,
-                    'decoded_body' => $paytoken_body
+                $paytoken_response = wp_remote_get($api_url . '/getlatestpaytoken/' . $org_id, array(
+                    'headers' => array(
+                        'accept' => 'application/json',
+                        'X-API-KEY' => $this->api_key,
+                        'X-APP-ID' => $this->app_id
+                    ),
+                    'timeout' => 30
                 ));
 
-                // Check for credentials mismatch error
-                $error_message = $paytoken_body['error']['message'] ?? $paytoken_body['error'] ?? '';
-                if (is_array($error_message)) {
-                    $error_message = $error_message['message'] ?? '';
-                }
+                if (!is_wp_error($paytoken_response)) {
+                    $paytoken_status = wp_remote_retrieve_response_code($paytoken_response);
+                    $paytoken_raw_body = wp_remote_retrieve_body($paytoken_response);
+                    $paytoken_body = json_decode($paytoken_raw_body, true);
 
-                if (strpos(strtolower($error_message), 'invalid request headers') !== false) {
-                    // This org was created under different merchant credentials
-                    // The email exists in Monarch but under a different merchant
-                    // We cannot access it - inform the user
-                    $logger->error('Org credentials mismatch - org belongs to different merchant', array(
+                    // Ensure paytoken_body is an array
+                    if (!is_array($paytoken_body)) {
+                        $paytoken_body = array();
+                    }
+
+                    $logger->debug('getlatestpaytoken API response for existing user', array(
                         'org_id' => $org_id,
-                        'error' => $error_message,
-                        'current_merchant_api_key_last_4' => substr($this->api_key, -4)
+                        'status_code' => $paytoken_status,
+                        'raw_body' => $paytoken_raw_body,
+                        'decoded_body' => $paytoken_body
                     ));
 
-                    wp_send_json_error('This email is already registered with a different payment provider configuration. Please contact support or use a different email address.');
-                    return;
-                }
-
-                if ($paytoken_status >= 200 && $paytoken_status < 300 && !empty($paytoken_body)) {
-                    // Check multiple possible field names for paytoken ID
-                    $existing_paytoken_id = $paytoken_body['_id']
-                        ?? $paytoken_body['payToken']
-                        ?? $paytoken_body['payTokenId']
-                        ?? $paytoken_body['id']
-                        ?? $paytoken_body['paytoken_id']
-                        ?? null;
-
-                    // If still not found, check if the response itself is the paytoken object
-                    if (!$existing_paytoken_id && isset($paytoken_body['dda'])) {
-                        // Response is the paytoken object itself, look for ID field
-                        $existing_paytoken_id = $paytoken_body['_id'] ?? null;
+                    // Check for credentials mismatch error - with safe array access
+                    $error_message = '';
+                    if (isset($paytoken_body['error'])) {
+                        if (is_array($paytoken_body['error']) && isset($paytoken_body['error']['message'])) {
+                            $error_message = $paytoken_body['error']['message'];
+                        } elseif (is_string($paytoken_body['error'])) {
+                            $error_message = $paytoken_body['error'];
+                        }
                     }
-                }
 
-                $logger->debug('Paytoken extraction result', array(
-                    'org_id' => $org_id,
-                    'has_paytoken' => !empty($existing_paytoken_id),
-                    'paytoken_id' => $existing_paytoken_id
-                ));
-            } else {
-                $logger->error('getlatestpaytoken API call failed', array(
-                    'org_id' => $org_id,
-                    'error' => $paytoken_response->get_error_message()
-                ));
+                    if (strpos(strtolower($error_message), 'invalid request headers') !== false) {
+                        // This org was created under different merchant credentials
+                        // The email exists in Monarch but under a different merchant
+                        // We cannot access it - inform the user
+                        $logger->error('Org credentials mismatch - org belongs to different merchant', array(
+                            'org_id' => $org_id,
+                            'error' => $error_message,
+                            'current_merchant_api_key_last_4' => substr($this->api_key, -4)
+                        ));
+
+                        wp_send_json_error('This email is already registered with a different payment provider configuration. Please contact support or use a different email address.');
+                        return;
+                    }
+
+                    if ($paytoken_status >= 200 && $paytoken_status < 300 && !empty($paytoken_body)) {
+                        // Check multiple possible field names for paytoken ID
+                        $existing_paytoken_id = $paytoken_body['_id']
+                            ?? $paytoken_body['payToken']
+                            ?? $paytoken_body['payTokenId']
+                            ?? $paytoken_body['id']
+                            ?? $paytoken_body['paytoken_id']
+                            ?? null;
+
+                        // If still not found, check if the response itself is the paytoken object
+                        if (!$existing_paytoken_id && isset($paytoken_body['dda'])) {
+                            // Response is the paytoken object itself, look for ID field
+                            $existing_paytoken_id = $paytoken_body['_id'] ?? null;
+                        }
+                    }
+
+                    $logger->debug('Paytoken extraction result', array(
+                        'org_id' => $org_id,
+                        'has_paytoken' => !empty($existing_paytoken_id),
+                        'paytoken_id' => $existing_paytoken_id
+                    ));
+                } else {
+                    $logger->error('getlatestpaytoken API call failed', array(
+                        'org_id' => $org_id,
+                        'error' => $paytoken_response->get_error_message()
+                    ));
+                }
             }
-            } // End of if (empty($existing_paytoken_id)) - API check
 
             // Save org data
             if ($is_guest) {
@@ -1293,11 +1323,37 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
             }
 
             // SECOND: Call API to get paytoken
-            // Use MERCHANT credentials for getLatestPayToken
-            // The organization is a child of the merchant, so merchant credentials work
+            // Check if we have purchaser-specific credentials (stored when org was created)
+            // These are required for getLatestPayToken to work correctly
+            $purchaser_api_key = null;
+            $purchaser_app_id = null;
+
+            if ($customer_id) {
+                // First check temp credentials (for newly created orgs)
+                $purchaser_api_key = get_user_meta($customer_id, '_monarch_temp_org_api_key', true);
+                $purchaser_app_id = get_user_meta($customer_id, '_monarch_temp_org_app_id', true);
+
+                // If no temp credentials, check permanent credentials
+                if (empty($purchaser_api_key)) {
+                    $purchaser_api_key = get_user_meta($customer_id, '_monarch_org_api_key', true);
+                    $purchaser_app_id = get_user_meta($customer_id, '_monarch_org_app_id', true);
+                }
+            }
+
+            // Use purchaser credentials if available, otherwise fall back to merchant credentials
+            $api_key_to_use = !empty($purchaser_api_key) ? $purchaser_api_key : $this->api_key;
+            $app_id_to_use = !empty($purchaser_app_id) ? $purchaser_app_id : $this->app_id;
+
+            $logger->debug('Using credentials for getLatestPayToken', array(
+                'org_id' => $org_id,
+                'using_purchaser_credentials' => !empty($purchaser_api_key),
+                'api_key_last_4' => substr($api_key_to_use, -4),
+                'app_id' => $app_id_to_use
+            ));
+
             $monarch_api = new Monarch_API(
-                $this->api_key,
-                $this->app_id,
+                $api_key_to_use,
+                $app_id_to_use,
                 $this->merchant_org_id,
                 $this->partner_name,
                 $this->testmode
@@ -1324,10 +1380,22 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                         update_user_meta($customer_id, '_monarch_org_id', $temp_org_id);
                     }
 
+                    // Store purchaser credentials permanently (move from temp to permanent)
+                    $temp_api_key = get_user_meta($customer_id, '_monarch_temp_org_api_key', true);
+                    $temp_app_id = get_user_meta($customer_id, '_monarch_temp_org_app_id', true);
+                    if ($temp_api_key) {
+                        update_user_meta($customer_id, '_monarch_org_api_key', $temp_api_key);
+                        update_user_meta($customer_id, '_monarch_org_app_id', $temp_app_id);
+                        // Clean up temp credentials
+                        delete_user_meta($customer_id, '_monarch_temp_org_api_key');
+                        delete_user_meta($customer_id, '_monarch_temp_org_app_id');
+                    }
+
                     // Log success
                     $logger->log_customer_event('paytoken_retrieved', $customer_id, array(
                         'org_id' => $org_id,
-                        'paytoken_id' => $paytoken_id
+                        'paytoken_id' => $paytoken_id,
+                        'has_purchaser_credentials' => !empty($temp_api_key)
                     ));
 
                     wp_send_json_success(array(
@@ -1519,19 +1587,51 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 }
             }
 
-            // No valid paytoken - need to get bank linking URL
-            // Use the comprehensive helper that tries multiple endpoints
-            // Pass the appropriate credentials (purchaser if available, otherwise merchant)
-            $logger->debug('ajax_get_bank_linking_url: No valid paytoken, getting bank linking URL', array(
-                'org_id' => $org_id,
-                'using_purchaser_credentials' => !empty($purchaser_api_key)
+            // No valid paytoken - need to get bank linking URL via /merchants/verify
+            $logger->debug('ajax_get_bank_linking_url: No valid paytoken, calling /merchants/verify', array(
+                'org_id' => $org_id
             ));
 
-            $bank_linking_url = $this->get_bank_linking_url_for_org($org_id, $logger, $api_key_to_use, $app_id_to_use);
+            // Get the user's email to call /merchants/verify
+            $user_email = '';
+            if ($customer_id) {
+                $user = get_userdata($customer_id);
+                if ($user) {
+                    $user_email = $user->user_email;
+                }
+            }
+
+            $bank_linking_url = '';
+            if (!empty($user_email)) {
+                // Call /merchants/verify to get partner_embedded_url
+                $verify_response = wp_remote_get($api_url . '/merchants/verify/' . urlencode($user_email), array(
+                    'headers' => array(
+                        'accept' => 'application/json',
+                        'X-API-KEY' => $this->api_key,
+                        'X-APP-ID' => $this->app_id
+                    ),
+                    'timeout' => 30
+                ));
+
+                if (!is_wp_error($verify_response)) {
+                    $verify_status = wp_remote_retrieve_response_code($verify_response);
+                    $verify_body = json_decode(wp_remote_retrieve_body($verify_response), true);
+
+                    $logger->debug('/merchants/verify response for bank linking URL', array(
+                        'status_code' => $verify_status,
+                        'has_partner_embedded_url' => !empty($verify_body['partner_embedded_url'])
+                    ));
+
+                    if ($verify_status >= 200 && $verify_status < 300 && !empty($verify_body['partner_embedded_url'])) {
+                        $bank_linking_url = $verify_body['partner_embedded_url'];
+                    }
+                }
+            }
 
             if (empty($bank_linking_url)) {
-                $logger->error('ajax_get_bank_linking_url: Could not retrieve bank linking URL from any endpoint', array(
-                    'org_id' => $org_id
+                $logger->error('ajax_get_bank_linking_url: Could not retrieve bank linking URL', array(
+                    'org_id' => $org_id,
+                    'user_email' => $user_email
                 ));
 
                 // Clear the user's Monarch data so they can re-register
