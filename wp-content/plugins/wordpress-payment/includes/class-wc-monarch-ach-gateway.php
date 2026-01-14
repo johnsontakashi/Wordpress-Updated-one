@@ -1101,15 +1101,11 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
 
     /**
      * AJAX handler for checking bank connection status
-     *
-     * IMPORTANT: Must use the PURCHASER's API credentials
-     * The orgId must be associated with the security headers being used.
+     * Uses merchant credentials since child organizations are under the merchant
      */
     public function ajax_check_bank_status() {
         check_ajax_referer('monarch_ach_nonce', 'nonce');
 
-        // Support both logged in users and guest checkout
-        $is_guest = !is_user_logged_in();
         $org_id = sanitize_text_field($_POST['org_id']);
 
         if (!$org_id) {
@@ -1117,52 +1113,17 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
         }
 
         try {
-            if ($is_guest) {
-                // For guest checkout, verify session exists
-                if (!WC()->session || !WC()->session->get_session_cookie()) {
-                    wp_send_json_error('Session required for guest checkout');
-                    return;
-                }
-            } else {
-                $customer_id = get_current_user_id();
-            }
-
-            // IMPORTANT: Use the PURCHASER's API credentials
-            // The orgId must be associated with the security headers being used
-            if ($is_guest) {
-                // For guest checkout, credentials should be in session from organization creation
-                $temp_api_data = WC()->session->get('monarch_temp_api_data');
-                $purchaser_api_key = $temp_api_data['api']['sandbox']['api_key'] ?? null;
-                $purchaser_app_id = $temp_api_data['api']['sandbox']['app_id'] ?? null;
-            } else {
-                // Check BOTH temp (new registration) AND permanent (returning user) credentials
-                $purchaser_api_key = get_user_meta($customer_id, '_monarch_temp_org_api_key', true);
-                if (empty($purchaser_api_key)) {
-                    // Returning user - try permanent credentials
-                    $purchaser_api_key = get_user_meta($customer_id, '_monarch_org_api_key', true);
-                }
-                $purchaser_app_id = get_user_meta($customer_id, '_monarch_temp_org_app_id', true);
-                if (empty($purchaser_app_id)) {
-                    // Returning user - try permanent credentials
-                    $purchaser_app_id = get_user_meta($customer_id, '_monarch_org_app_id', true);
-                }
-            }
-
-            // Use purchaser credentials if available, otherwise fall back to merchant credentials
-            $api_key_to_use = $purchaser_api_key ?: $this->api_key;
-            $app_id_to_use = $purchaser_app_id ?: $this->app_id;
-
             // Query Monarch API to get latest paytoken for the organization
+            // Use merchant credentials - works for child organizations
             $api_url = $this->testmode
                 ? 'https://devapi.monarch.is/v1'
                 : 'https://api.monarch.is/v1';
 
-            // Use /getlatestpaytoken/ endpoint which works with merchant credentials for child organizations
             $response = wp_remote_get($api_url . '/getlatestpaytoken/' . $org_id, array(
                 'headers' => array(
                     'accept' => 'application/json',
-                    'X-API-KEY' => $api_key_to_use,
-                    'X-APP-ID' => $app_id_to_use
+                    'X-API-KEY' => $this->api_key,
+                    'X-APP-ID' => $this->app_id
                 ),
                 'timeout' => 30
             ));
@@ -1233,39 +1194,20 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
         try {
             $customer_id = get_current_user_id();
 
-            // IMPORTANT: Use the PURCHASER's API credentials for getLatestPayToken
-            // The orgId must be associated with the security headers being used
-            // Check BOTH temp (new registration) AND permanent (returning user) credentials
-            $purchaser_api_key = get_user_meta($customer_id, '_monarch_temp_org_api_key', true);
-            if (empty($purchaser_api_key)) {
-                // Returning user - try permanent credentials
-                $purchaser_api_key = get_user_meta($customer_id, '_monarch_org_api_key', true);
-            }
-            $purchaser_app_id = get_user_meta($customer_id, '_monarch_temp_org_app_id', true);
-            if (empty($purchaser_app_id)) {
-                // Returning user - try permanent credentials
-                $purchaser_app_id = get_user_meta($customer_id, '_monarch_org_app_id', true);
-            }
-
-            // Log credentials being used
+            // Log the call
             $logger->debug('ajax_get_latest_paytoken called', array(
                 'org_id' => $org_id,
-                'using_purchaser_credentials' => !empty($purchaser_api_key),
-                'purchaser_api_key_last_4' => $purchaser_api_key ? substr($purchaser_api_key, -4) : 'N/A',
-                'purchaser_app_id' => $purchaser_app_id ?: 'N/A',
                 'merchant_api_key_last_4' => substr($this->api_key, -4),
                 'merchant_app_id' => $this->app_id,
                 'testmode' => $this->testmode ? 'yes' : 'no'
             ));
 
-            // Use purchaser credentials if available, otherwise fall back to merchant credentials
-            $api_key_to_use = $purchaser_api_key ?: $this->api_key;
-            $app_id_to_use = $purchaser_app_id ?: $this->app_id;
-
-            // Initialize Monarch API with the correct credentials
+            // Use MERCHANT credentials for getLatestPayToken
+            // The organization is a child of the merchant, so merchant credentials work
+            // This is consistent with how we check paytoken in ajax_create_organization
             $monarch_api = new Monarch_API(
-                $api_key_to_use,
-                $app_id_to_use,
+                $this->api_key,
+                $this->app_id,
                 $this->merchant_org_id,
                 $this->partner_name,
                 $this->testmode
@@ -1321,17 +1263,14 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                     'org_id' => $org_id,
                     'error' => $error_message,
                     'status_code' => $status_code,
-                    'using_purchaser_credentials' => !empty($purchaser_api_key),
                     'full_response' => $result
                 ));
 
                 // 404 typically means no paytoken exists yet
                 if ($status_code == 404 || strpos(strtolower($error_message), 'not found') !== false) {
-                    $creds_info = !empty($purchaser_api_key) ? '(using purchaser credentials)' : '(using merchant credentials - purchaser credentials not found)';
-                    wp_send_json_error('PayToken not found ' . $creds_info . '. Bank linking may not be complete yet.');
+                    wp_send_json_error('PayToken not found. Bank linking may not be complete yet.');
                 } else {
-                    $creds_info = !empty($purchaser_api_key) ? '(purchaser creds)' : '(merchant creds)';
-                    wp_send_json_error($error_message . ' ' . $creds_info);
+                    wp_send_json_error($error_message);
                 }
             }
 
