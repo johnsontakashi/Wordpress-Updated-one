@@ -291,7 +291,7 @@ class WC_Monarch_ACH_Gateway_Plugin {
                     <?php if (!empty($transaction->created_at)): ?>
                     <tr>
                         <th>Date</th>
-                        <td><?php echo esc_html(date_i18n(get_option('date_format') . ' ' . get_option('time_format'), strtotime($transaction->created_at))); ?></td>
+                        <td><?php echo esc_html(date_i18n(get_option('date_format') . ' ' . get_option('time_format'), strtotime($transaction->created_at . ' UTC'))); ?></td>
                     </tr>
                     <?php endif; ?>
                 </tbody>

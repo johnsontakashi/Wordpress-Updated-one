@@ -244,7 +244,7 @@ class WC_Monarch_Admin {
                 <?php echo wc_price($db_transaction->amount); ?>
             </p>
             <p><strong>Date:</strong><br>
-                <?php echo esc_html(date('M j, Y g:i A', strtotime($db_transaction->created_at))); ?>
+                <?php echo esc_html(date_i18n('M j, Y g:i A', strtotime($db_transaction->created_at . ' UTC'))); ?>
             </p>
             <?php endif; ?>
         </div>
@@ -480,7 +480,7 @@ class WC_Monarch_Admin {
                                     </span>
                                 </td>
                                 <td><?php echo esc_html($customer_name); ?></td>
-                                <td><?php echo date('M j, Y g:i A', strtotime($transaction->created_at)); ?></td>
+                                <td><?php echo date_i18n('M j, Y g:i A', strtotime($transaction->created_at . ' UTC')); ?></td>
                                 <td>
                                     <button class="button button-small view-details" 
                                             data-transaction="<?php echo esc_attr($transaction->id); ?>">
@@ -1435,7 +1435,7 @@ class WC_Monarch_Admin {
             'currency' => $transaction->currency ?: 'USD',
             'status' => $transaction->status,
             'status_label' => $status_labels[strtolower($transaction->status)] ?? ucfirst($transaction->status),
-            'created_at' => date('M j, Y g:i A', strtotime($transaction->created_at)),
+            'created_at' => date_i18n('M j, Y g:i A', strtotime($transaction->created_at . ' UTC')),
             'monarch_org_id' => $transaction->monarch_org_id ?: 'N/A',
             'paytoken_id' => $transaction->paytoken_id ?: 'N/A',
             'order_status' => wc_get_order_status_name($order->get_status()),
