@@ -1085,18 +1085,41 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                         $org_id = $retry_result['data']['orgId'];
                         $bank_linking_url = $retry_result['data']['partner_embedded_url'] ?? '';
 
+                        // CRITICAL: Extract purchaser credentials - these MUST be used for getlatestpaytoken
+                        $retry_org_api_key = null;
+                        $retry_org_app_id = null;
+                        if (isset($retry_result['data']['api'])) {
+                            $credentials_key = $this->testmode ? 'sandbox' : 'prod';
+                            $retry_org_credentials = $retry_result['data']['api'][$credentials_key] ?? null;
+                            if ($retry_org_credentials) {
+                                $retry_org_api_key = $retry_org_credentials['api_key'] ?? null;
+                                $retry_org_app_id = $retry_org_credentials['app_id'] ?? null;
+                            }
+                        }
+
                         $logger->debug('Organization created with modified email', array(
                             'org_id' => $org_id,
-                            'modified_email' => $modified_email
+                            'modified_email' => $modified_email,
+                            'has_purchaser_credentials' => !empty($retry_org_api_key)
                         ));
 
-                        // Save org data
+                        // Save org data INCLUDING purchaser credentials
                         if ($is_guest) {
                             WC()->session->set('monarch_temp_org_id', $org_id);
                             WC()->session->set('monarch_temp_user_id', $user_id);
+                            WC()->session->set('monarch_registered_email', $modified_email);
+                            if ($retry_org_api_key) {
+                                WC()->session->set('monarch_temp_org_api_key', $retry_org_api_key);
+                                WC()->session->set('monarch_temp_org_app_id', $retry_org_app_id);
+                            }
                         } else {
                             update_user_meta($customer_id, '_monarch_temp_org_id', $org_id);
                             update_user_meta($customer_id, '_monarch_temp_user_id', $user_id);
+                            update_user_meta($customer_id, '_monarch_registered_email', $modified_email);
+                            if ($retry_org_api_key) {
+                                update_user_meta($customer_id, '_monarch_temp_org_api_key', $retry_org_api_key);
+                                update_user_meta($customer_id, '_monarch_temp_org_app_id', $retry_org_app_id);
+                            }
                         }
 
                         wp_send_json_success(array(
