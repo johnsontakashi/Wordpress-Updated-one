@@ -305,8 +305,11 @@ jQuery(document).ready(function($) {
             }
             window.removeEventListener('message', handleBankMessage);
             $('#bank-connection-modal').remove();
+            // Reset both new user and returning user buttons
             $('#monarch-connect-bank').prop('disabled', false).text('Connect Bank Account');
             $('#monarch-connect-spinner').hide();
+            $('#monarch-reconnect-bank').prop('disabled', false).text('Continue with Bank');
+            $('#monarch-reconnect-spinner').hide();
         });
 
         // Close on overlay click
@@ -316,8 +319,11 @@ jQuery(document).ready(function($) {
             }
             window.removeEventListener('message', handleBankMessage);
             $('#bank-connection-modal').remove();
+            // Reset both new user and returning user buttons
             $('#monarch-connect-bank').prop('disabled', false).text('Connect Bank Account');
             $('#monarch-connect-spinner').hide();
+            $('#monarch-reconnect-bank').prop('disabled', false).text('Continue with Bank');
+            $('#monarch-reconnect-spinner').hide();
         });
 
         // Handle "I've Connected My Bank" button
@@ -375,48 +381,42 @@ jQuery(document).ready(function($) {
         window.monarchIframeLoadCount = iframeLoadCount;
     }
 
-    // Open success page in a new browser window
+    // Show success message inside the modal and verify bank connection
     function openSuccessWindow(callbackUrl) {
-        console.log('Opening success page in new window:', callbackUrl);
+        console.log('Bank linking detected, showing success in modal');
 
-        // Open the success page in a new browser window
-        const successWindow = window.open(
-            callbackUrl,
-            'MonarchBankSuccess',
-            'width=500,height=600,left=' + ((screen.width - 500) / 2) + ',top=' + ((screen.height - 600) / 2) + ',scrollbars=yes,resizable=yes'
+        // Get org_id from the callback URL
+        const urlParams = new URLSearchParams(callbackUrl.split('?')[1]);
+        const orgId = urlParams.get('org_id') || window.monarchCurrentOrgId;
+
+        // Update modal to show success message inside iframe container
+        $('.monarch-iframe-container').html(
+            '<div class="monarch-success-container">' +
+            '<div class="monarch-spinner-large"></div>' +
+            '<h4>Bank Linked Successfully!</h4>' +
+            '<p>Verifying your bank connection...</p>' +
+            '</div>'
         );
 
-        if (successWindow) {
-            // Update modal to show waiting for success window
-            $('.monarch-iframe-container').html(
-                '<div class="monarch-popup-waiting">' +
-                '<div class="monarch-spinner-large"></div>' +
-                '<h4>Bank Linking Complete!</h4>' +
-                '<p>Please confirm in the new window that opened.</p>' +
-                '<p class="monarch-popup-note">If the window was blocked, <a href="#" id="open-success-window">click here to open it</a>.</p>' +
-                '</div>'
-            );
-
-            // Add CSS for spinner if not already added
-            if (!$('#monarch-spinner-style').length) {
-                $('head').append('<style id="monarch-spinner-style">' +
-                    '.monarch-popup-waiting { text-align: center; padding: 40px 20px; }' +
-                    '.monarch-spinner-large { width: 50px; height: 50px; border: 4px solid #f3f3f3; border-top: 4px solid #0073aa; border-radius: 50%; animation: monarch-spin 1s linear infinite; margin: 0 auto 20px; }' +
-                    '@keyframes monarch-spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }' +
-                    '.monarch-popup-waiting h4 { margin: 0 0 10px; color: #333; }' +
-                    '.monarch-popup-waiting p { color: #666; margin: 5px 0; }' +
-                    '.monarch-popup-note { font-size: 12px; margin-top: 15px !important; }' +
-                    '</style>');
-            }
-
-            // Handle click to reopen success window
-            $(document).on('click', '#open-success-window', function(e) {
-                e.preventDefault();
-                window.open(callbackUrl, 'MonarchBankSuccess', 'width=500,height=600,scrollbars=yes,resizable=yes');
-            });
-        } else {
-            alert('Please allow popups for this site to complete bank linking.');
+        // Add CSS for success container if not already added
+        if (!$('#monarch-spinner-style').length) {
+            $('head').append('<style id="monarch-spinner-style">' +
+                '.monarch-success-container { text-align: center; padding: 60px 20px; background: #f8fff8; border-radius: 8px; }' +
+                '.monarch-spinner-large { width: 50px; height: 50px; border: 4px solid #f3f3f3; border-top: 4px solid #28a745; border-radius: 50%; animation: monarch-spin 1s linear infinite; margin: 0 auto 20px; }' +
+                '@keyframes monarch-spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }' +
+                '.monarch-success-container h4 { margin: 0 0 10px; color: #28a745; font-size: 20px; }' +
+                '.monarch-success-container p { color: #666; margin: 5px 0; }' +
+                '.monarch-success-icon { font-size: 48px; color: #28a745; margin-bottom: 15px; }' +
+                '</style>');
         }
+
+        // Hide the "I've Connected My Bank" button since we're auto-verifying
+        $('#monarch-bank-connected-btn').hide();
+
+        // Automatically start verifying the bank connection
+        setTimeout(function() {
+            checkBankConnectionStatus(orgId, 0, window.monarchIsExistingUser);
+        }, 1000);
     }
 
     // Handle messages from Monarch iframe
@@ -666,8 +666,11 @@ jQuery(document).ready(function($) {
                     if (response.data && response.data.action === 'email_locked') {
                         alert('ERROR: ' + (response.data.message || 'This email is registered under a different merchant account.') + '\n\nPlease close this window and use a DIFFERENT email address.');
                         $('#bank-connection-modal').remove();
+                        // Reset both new user and returning user buttons
                         $('#monarch-connect-bank').prop('disabled', false).text('Connect Bank Account');
                         $('#monarch-connect-spinner').hide();
+                        $('#monarch-reconnect-bank').prop('disabled', false).text('Continue with Bank');
+                        $('#monarch-reconnect-spinner').hide();
                         return;
                     }
 
@@ -719,6 +722,22 @@ jQuery(document).ready(function($) {
 
     // Complete bank connection after successful linking
     function completeBankConnection(payTokenId) {
+        // Show completion message in modal before closing
+        $('.monarch-success-container, .monarch-iframe-container').html(
+            '<div class="monarch-success-container">' +
+            '<div class="monarch-success-checkmark">✓</div>' +
+            '<h4>Bank Connected Successfully!</h4>' +
+            '<p>Completing setup...</p>' +
+            '</div>'
+        );
+
+        // Add checkmark style if not already added
+        if (!$('#monarch-checkmark-style').length) {
+            $('head').append('<style id="monarch-checkmark-style">' +
+                '.monarch-success-checkmark { font-size: 60px; color: #28a745; margin-bottom: 15px; }' +
+                '</style>');
+        }
+
         $.ajax({
             url: monarch_ach_params.ajax_url,
             method: 'POST',
@@ -734,45 +753,38 @@ jQuery(document).ready(function($) {
                     $('#monarch_org_id').val(response.data.org_id);
                     $('#monarch_paytoken_id').val(response.data.paytoken_id);
                     $('#monarch_bank_verified').val('true');
-
-                    // Close modal
-                    $('#bank-connection-modal').remove();
-                    window.removeEventListener('message', handleBankMessage);
-
-                    // Refresh checkout to show connected status
-                    location.reload();
-                } else {
-                    // Even if backend returns error, the bank IS connected (we have paytoken)
-                    // Save the paytoken locally and show success
-                    console.log('Backend error but bank is connected. PayToken:', payTokenId);
-
-                    // Store paytoken in form
-                    $('#monarch_paytoken_id').val(payTokenId);
-                    $('#monarch_bank_verified').val('true');
-
-                    // Close modal
-                    $('#bank-connection-modal').remove();
-                    window.removeEventListener('message', handleBankMessage);
-
-                    // Show success message and reload
-                    alert('Bank connection successful! Click OK to continue.');
-                    location.reload();
                 }
+
+                // Store paytoken in form (even if backend had issues)
+                $('#monarch_paytoken_id').val(payTokenId);
+                $('#monarch_bank_verified').val('true');
+
+                // Clean up and close modal
+                if (window.monarchIframeMonitor) {
+                    clearInterval(window.monarchIframeMonitor);
+                }
+                window.removeEventListener('message', handleBankMessage);
+                $('#bank-connection-modal').remove();
+
+                // Refresh checkout to show connected status
+                location.reload();
             },
             error: function(jqXHR, textStatus, errorThrown) {
                 // Even on error, if we have paytoken, the bank IS connected
-                console.log('Connection error but bank may be connected. PayToken:', payTokenId);
+                console.log('Connection error but bank is connected. PayToken:', payTokenId);
 
                 // Store paytoken in form
                 $('#monarch_paytoken_id').val(payTokenId);
                 $('#monarch_bank_verified').val('true');
 
-                // Close modal
-                $('#bank-connection-modal').remove();
+                // Clean up and close modal
+                if (window.monarchIframeMonitor) {
+                    clearInterval(window.monarchIframeMonitor);
+                }
                 window.removeEventListener('message', handleBankMessage);
+                $('#bank-connection-modal').remove();
 
-                // Show success message and reload
-                alert('Bank connection successful! Click OK to continue.');
+                // Refresh checkout to show connected status
                 location.reload();
             }
         });
