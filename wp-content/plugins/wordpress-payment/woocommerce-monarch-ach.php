@@ -203,6 +203,9 @@ class WC_Monarch_ACH_Gateway_Plugin {
             $order->get_id()
         ));
 
+        // Track if transaction is from database (UTC) or order meta (local timezone)
+        $is_db_transaction = false;
+
         // If no transaction in custom table, try to get from order meta
         if (!$transaction) {
             $transaction_id = $order->get_transaction_id();
@@ -210,6 +213,7 @@ class WC_Monarch_ACH_Gateway_Plugin {
 
             if ($transaction_id || $monarch_transaction_id) {
                 // Create a pseudo-transaction object from order meta
+                // Note: get_date_created() returns date in WordPress timezone, not UTC
                 $transaction = (object) array(
                     'transaction_id' => $transaction_id ?: $monarch_transaction_id,
                     'status' => $this->map_order_status_to_transaction_status($order->get_status()),
@@ -217,6 +221,8 @@ class WC_Monarch_ACH_Gateway_Plugin {
                     'created_at' => $order->get_date_created() ? $order->get_date_created()->format('Y-m-d H:i:s') : ''
                 );
             }
+        } else {
+            $is_db_transaction = true;
         }
 
         if (!$transaction) {
@@ -291,7 +297,11 @@ class WC_Monarch_ACH_Gateway_Plugin {
                     <?php if (!empty($transaction->created_at)): ?>
                     <tr>
                         <th>Date</th>
-                        <td><?php echo esc_html(date_i18n(get_option('date_format') . ' ' . get_option('time_format'), strtotime($transaction->created_at . ' UTC'))); ?></td>
+                        <td><?php
+                            // DB transactions are stored in UTC, order meta dates are in local timezone
+                            $date_string = $is_db_transaction ? $transaction->created_at . ' UTC' : $transaction->created_at;
+                            echo esc_html(date_i18n(get_option('date_format') . ' ' . get_option('time_format'), strtotime($date_string)));
+                        ?></td>
                     </tr>
                     <?php endif; ?>
                 </tbody>
