@@ -662,6 +662,15 @@ jQuery(document).ready(function($) {
                     console.log('Bank linked successfully, paytoken:', response.data.paytoken_id);
                     completeBankConnection(response.data.paytoken_id);
                 } else {
+                    // Check if email is locked to different merchant - STOP immediately, no retries
+                    if (response.data && response.data.action === 'email_locked') {
+                        alert('ERROR: ' + (response.data.message || 'This email is registered under a different merchant account.') + '\n\nPlease close this window and use a DIFFERENT email address.');
+                        $('#bank-connection-modal').remove();
+                        $('#monarch-connect-bank').prop('disabled', false).text('Connect Bank Account');
+                        $('#monarch-connect-spinner').hide();
+                        return;
+                    }
+
                     // Check if this is a credentials mismatch that requires refresh
                     if (response.data && response.data.action === 'refresh_required') {
                         alert('Your account needs to be reconnected. The page will refresh so you can connect your bank again.');

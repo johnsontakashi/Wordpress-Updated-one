@@ -878,9 +878,11 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 ));
 
                 // Save org data including purchaser credentials for getlatestpaytoken
+                // IMPORTANT: Also save the email used to register with Monarch (may differ from WP user email)
                 if ($is_guest) {
                     WC()->session->set('monarch_temp_org_id', $org_id);
                     WC()->session->set('monarch_temp_user_id', $user_id);
+                    WC()->session->set('monarch_registered_email', $user_email);
                     if ($org_api_key) {
                         WC()->session->set('monarch_temp_org_api_key', $org_api_key);
                         WC()->session->set('monarch_temp_org_app_id', $org_app_id);
@@ -889,6 +891,7 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                     $customer_id = get_current_user_id();
                     update_user_meta($customer_id, '_monarch_temp_org_id', $org_id);
                     update_user_meta($customer_id, '_monarch_temp_user_id', $user_id);
+                    update_user_meta($customer_id, '_monarch_registered_email', $user_email);
                     if ($org_api_key) {
                         update_user_meta($customer_id, '_monarch_temp_org_api_key', $org_api_key);
                         update_user_meta($customer_id, '_monarch_temp_org_app_id', $org_app_id);
@@ -906,6 +909,14 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
 
             // Organization creation failed - check if email already exists
             $error_msg = strtolower($org_result['error'] ?? '');
+
+            // Log the full org creation error for debugging
+            $logger->debug('Organization creation failed', array(
+                'email' => $user_email,
+                'error_message' => $org_result['error'] ?? 'unknown',
+                'full_response' => $org_result
+            ));
+
             $is_email_exists_error = strpos($error_msg, 'email') !== false &&
                 (strpos($error_msg, 'already') !== false || strpos($error_msg, 'exists') !== false || strpos($error_msg, 'in use') !== false);
 
@@ -915,20 +926,71 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 return;
             }
 
-            // EXISTING USER - call /merchants/verify to get partner_embedded_url
-            $logger->debug('Email exists - calling /merchants/verify', array('email' => $user_email));
+            // EXISTING USER - email exists in Monarch
+            // First, check if this email belongs to OUR merchant or a different one
+            $logger->debug('Email exists in Monarch - checking ownership', array(
+                'email' => $user_email,
+                'org_creation_error' => $org_result['error'] ?? 'unknown'
+            ));
+
+            // Call /merchants/verify to get the org_id
             $verify_result = $monarch_api->get_user_by_email($user_email);
 
             if (!$verify_result['success'] || empty($verify_result['data'])) {
-                $logger->error('/merchants/verify failed for existing user', array(
+                // Can't verify - try creating with modified email
+                $logger->debug('Cannot verify existing user - will try modified email', array(
                     'email' => $user_email,
                     'error' => $verify_result['error'] ?? 'unknown'
                 ));
-                wp_send_json_error('Unable to retrieve your account. Please contact support.');
-                return;
+
+                // Create modified email by adding timestamp suffix before @
+                $email_parts = explode('@', $user_email);
+                $modified_email = $email_parts[0] . '+' . time() . '@' . $email_parts[1];
+
+                $logger->debug('Retrying organization creation with modified email', array(
+                    'original_email' => $user_email,
+                    'modified_email' => $modified_email
+                ));
+
+                // Update customer data with modified email
+                $customer_data['email'] = $modified_email;
+                $org_result = $monarch_api->create_organization($customer_data);
+
+                if ($org_result['success']) {
+                    // Success with modified email
+                    $user_id = $org_result['data']['_id'];
+                    $org_id = $org_result['data']['orgId'];
+                    $bank_linking_url = $org_result['data']['partner_embedded_url'] ?? '';
+
+                    $logger->debug('Organization created with modified email', array(
+                        'org_id' => $org_id,
+                        'modified_email' => $modified_email
+                    ));
+
+                    // Save org data
+                    if ($is_guest) {
+                        WC()->session->set('monarch_temp_org_id', $org_id);
+                        WC()->session->set('monarch_temp_user_id', $user_id);
+                    } else {
+                        $customer_id = get_current_user_id();
+                        update_user_meta($customer_id, '_monarch_temp_org_id', $org_id);
+                        update_user_meta($customer_id, '_monarch_temp_user_id', $user_id);
+                    }
+
+                    wp_send_json_success(array(
+                        'org_id' => $org_id,
+                        'user_id' => $user_id,
+                        'bank_linking_url' => $bank_linking_url,
+                        'existing_user' => false
+                    ));
+                    return;
+                } else {
+                    wp_send_json_error('Unable to create account. Please try again or contact support.');
+                    return;
+                }
             }
 
-            // Got existing user data
+            // Got existing user data - now check if we can access it
             $org_id = $verify_result['data']['orgId'] ?? null;
             $user_id = $verify_result['data']['userId'] ?? null;
             $bank_linking_url = $verify_result['data']['partner_embedded_url'] ?? '';
@@ -944,103 +1006,141 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 return;
             }
 
-            // FIRST: Check if user already has a paytoken stored in WordPress from previous connection
+            // Check if this org belongs to our merchant by calling /getlatestpaytoken
             $existing_paytoken_id = null;
-            if (!$is_guest) {
-                $customer_id = get_current_user_id();
-                $stored_paytoken = get_user_meta($customer_id, '_monarch_paytoken_id', true);
-                $stored_org_id = get_user_meta($customer_id, '_monarch_org_id', true);
+            $customer_id = !$is_guest ? get_current_user_id() : 0;
+            $credentials_match = true;
 
-                // If we have a stored paytoken AND the org_id matches, use it
-                if (!empty($stored_paytoken) && $stored_org_id === $org_id) {
-                    $logger->debug('Found stored paytoken in user meta', array(
-                        'org_id' => $org_id,
-                        'stored_paytoken' => $stored_paytoken
-                    ));
-                    $existing_paytoken_id = $stored_paytoken;
+            $api_url = $this->testmode ? 'https://devapi.monarch.is/v1' : 'https://api.monarch.is/v1';
+            $paytoken_response = wp_remote_get($api_url . '/getlatestpaytoken/' . $org_id, array(
+                'headers' => array(
+                    'accept' => 'application/json',
+                    'X-API-KEY' => $this->api_key,
+                    'X-APP-ID' => $this->app_id
+                ),
+                'timeout' => 30
+            ));
+
+            if (!is_wp_error($paytoken_response)) {
+                $paytoken_status = wp_remote_retrieve_response_code($paytoken_response);
+                $paytoken_raw_body = wp_remote_retrieve_body($paytoken_response);
+                $paytoken_body = json_decode($paytoken_raw_body, true);
+
+                if (!is_array($paytoken_body)) {
+                    $paytoken_body = array();
                 }
-            }
 
-            // SECOND: If no stored paytoken, check via API
-            if (empty($existing_paytoken_id)) {
-                $api_url = $this->testmode ? 'https://devapi.monarch.is/v1' : 'https://api.monarch.is/v1';
-                $paytoken_response = wp_remote_get($api_url . '/getlatestpaytoken/' . $org_id, array(
-                    'headers' => array(
-                        'accept' => 'application/json',
-                        'X-API-KEY' => $this->api_key,
-                        'X-APP-ID' => $this->app_id
-                    ),
-                    'timeout' => 30
+                $logger->debug('getlatestpaytoken API response for existing user', array(
+                    'org_id' => $org_id,
+                    'status_code' => $paytoken_status,
+                    'raw_body' => $paytoken_raw_body,
+                    'decoded_body' => $paytoken_body
                 ));
 
-                if (!is_wp_error($paytoken_response)) {
-                    $paytoken_status = wp_remote_retrieve_response_code($paytoken_response);
-                    $paytoken_raw_body = wp_remote_retrieve_body($paytoken_response);
-                    $paytoken_body = json_decode($paytoken_raw_body, true);
-
-                    // Ensure paytoken_body is an array
-                    if (!is_array($paytoken_body)) {
-                        $paytoken_body = array();
+                // Check for credentials mismatch error
+                $error_message = '';
+                if (isset($paytoken_body['error'])) {
+                    if (is_array($paytoken_body['error']) && isset($paytoken_body['error']['message'])) {
+                        $error_message = $paytoken_body['error']['message'];
+                    } elseif (is_string($paytoken_body['error'])) {
+                        $error_message = $paytoken_body['error'];
                     }
+                }
 
-                    $logger->debug('getlatestpaytoken API response for existing user', array(
+                if (strpos(strtolower($error_message), 'invalid request headers') !== false) {
+                    // This org belongs to a DIFFERENT merchant
+                    // Solution: Create a new org with modified email
+                    $credentials_match = false;
+
+                    $logger->debug('Email belongs to different merchant - creating new org with modified email', array(
                         'org_id' => $org_id,
-                        'status_code' => $paytoken_status,
-                        'raw_body' => $paytoken_raw_body,
-                        'decoded_body' => $paytoken_body
+                        'email' => $user_email
                     ));
 
-                    // Check for credentials mismatch error - with safe array access
-                    $error_message = '';
-                    if (isset($paytoken_body['error'])) {
-                        if (is_array($paytoken_body['error']) && isset($paytoken_body['error']['message'])) {
-                            $error_message = $paytoken_body['error']['message'];
-                        } elseif (is_string($paytoken_body['error'])) {
-                            $error_message = $paytoken_body['error'];
-                        }
+                    // Clear any stored data
+                    if ($customer_id) {
+                        delete_user_meta($customer_id, '_monarch_org_id');
+                        delete_user_meta($customer_id, '_monarch_temp_org_id');
+                        delete_user_meta($customer_id, '_monarch_paytoken_id');
+                        delete_user_meta($customer_id, '_monarch_user_id');
+                        delete_user_meta($customer_id, '_monarch_temp_user_id');
                     }
 
-                    if (strpos(strtolower($error_message), 'invalid request headers') !== false) {
-                        // This org was created under different merchant credentials
-                        // The email exists in Monarch but under a different merchant
-                        // We cannot access it - inform the user
-                        $logger->error('Org credentials mismatch - org belongs to different merchant', array(
+                    // Create modified email by adding timestamp suffix before @
+                    $email_parts = explode('@', $user_email);
+                    $modified_email = $email_parts[0] . '+' . time() . '@' . $email_parts[1];
+
+                    $logger->debug('Retrying organization creation with modified email', array(
+                        'original_email' => $user_email,
+                        'modified_email' => $modified_email
+                    ));
+
+                    // Update customer data with modified email
+                    $customer_data['email'] = $modified_email;
+                    $retry_result = $monarch_api->create_organization($customer_data);
+
+                    if ($retry_result['success']) {
+                        // Success with modified email
+                        $user_id = $retry_result['data']['_id'];
+                        $org_id = $retry_result['data']['orgId'];
+                        $bank_linking_url = $retry_result['data']['partner_embedded_url'] ?? '';
+
+                        $logger->debug('Organization created with modified email', array(
                             'org_id' => $org_id,
-                            'error' => $error_message,
-                            'current_merchant_api_key_last_4' => substr($this->api_key, -4)
+                            'modified_email' => $modified_email
                         ));
 
-                        wp_send_json_error('This email is already registered with a different payment provider configuration. Please contact support or use a different email address.');
+                        // Save org data
+                        if ($is_guest) {
+                            WC()->session->set('monarch_temp_org_id', $org_id);
+                            WC()->session->set('monarch_temp_user_id', $user_id);
+                        } else {
+                            update_user_meta($customer_id, '_monarch_temp_org_id', $org_id);
+                            update_user_meta($customer_id, '_monarch_temp_user_id', $user_id);
+                        }
+
+                        wp_send_json_success(array(
+                            'org_id' => $org_id,
+                            'user_id' => $user_id,
+                            'bank_linking_url' => $bank_linking_url,
+                            'existing_user' => false
+                        ));
+                        return;
+                    } else {
+                        wp_send_json_error('Unable to create account. Please try again or contact support.');
                         return;
                     }
-
-                    if ($paytoken_status >= 200 && $paytoken_status < 300 && !empty($paytoken_body)) {
-                        // Check multiple possible field names for paytoken ID
-                        $existing_paytoken_id = $paytoken_body['_id']
-                            ?? $paytoken_body['payToken']
-                            ?? $paytoken_body['payTokenId']
-                            ?? $paytoken_body['id']
-                            ?? $paytoken_body['paytoken_id']
-                            ?? null;
-
-                        // If still not found, check if the response itself is the paytoken object
-                        if (!$existing_paytoken_id && isset($paytoken_body['dda'])) {
-                            // Response is the paytoken object itself, look for ID field
-                            $existing_paytoken_id = $paytoken_body['_id'] ?? null;
-                        }
-                    }
-
-                    $logger->debug('Paytoken extraction result', array(
-                        'org_id' => $org_id,
-                        'has_paytoken' => !empty($existing_paytoken_id),
-                        'paytoken_id' => $existing_paytoken_id
-                    ));
-                } else {
-                    $logger->error('getlatestpaytoken API call failed', array(
-                        'org_id' => $org_id,
-                        'error' => $paytoken_response->get_error_message()
-                    ));
                 }
+
+                // Credentials match - extract paytoken if exists
+                if ($paytoken_status >= 200 && $paytoken_status < 300 && !empty($paytoken_body)) {
+                    $existing_paytoken_id = $paytoken_body['_id']
+                        ?? $paytoken_body['payToken']
+                        ?? $paytoken_body['payTokenId']
+                        ?? $paytoken_body['id']
+                        ?? $paytoken_body['paytoken_id']
+                        ?? null;
+
+                    if (!$existing_paytoken_id && isset($paytoken_body['dda'])) {
+                        $existing_paytoken_id = $paytoken_body['_id'] ?? null;
+                    }
+                }
+
+                $logger->debug('Paytoken extraction result', array(
+                    'org_id' => $org_id,
+                    'has_paytoken' => !empty($existing_paytoken_id),
+                    'paytoken_id' => $existing_paytoken_id
+                ));
+            } else {
+                $logger->error('getlatestpaytoken API call failed', array(
+                    'org_id' => $org_id,
+                    'error' => $paytoken_response->get_error_message()
+                ));
+            }
+
+            // If credentials didn't match, we already handled it above and returned
+            if (!$credentials_match) {
+                return;
             }
 
             // Save org data
@@ -1426,41 +1526,24 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
 
                 // Check if this is an "Invalid request headers for this org_Id" error
                 // This means the org was created under different merchant credentials
-                // IMPORTANT: Only trigger refresh_required for EXISTING users (where org_id is stored permanently)
-                // For NEW users (only temp_org_id exists), this is likely just a timing issue
+                // This is a FATAL error - the email is locked to another merchant
                 if (strpos(strtolower($error_message), 'invalid request headers') !== false) {
-                    // Check if this is an existing user (has permanent org_id) vs new user (only temp_org_id)
-                    $stored_org_id = $customer_id ? get_user_meta($customer_id, '_monarch_org_id', true) : '';
-                    $temp_org_id = $customer_id ? get_user_meta($customer_id, '_monarch_temp_org_id', true) : '';
-                    $is_new_user = empty($stored_org_id) && !empty($temp_org_id);
-
-                    if ($is_new_user) {
-                        // For NEW users, this org was JUST created with current credentials
-                        // The error is likely a timing issue or transient API error
-                        // Let the retry logic handle it instead of clearing data
-                        $logger->debug('Invalid headers error for NEW user - treating as timing issue', array(
-                            'org_id' => $org_id,
-                            'error' => $error_message,
-                            'is_new_user' => true
-                        ));
-                        wp_send_json_error('PayToken not found. Bank linking may not be complete yet.');
-                        return;
-                    }
-
-                    // For EXISTING users, this is a genuine credentials mismatch
-                    $logger->error('Org credentials mismatch - clearing user data for re-registration', array(
+                    $logger->error('CRITICAL: Invalid request headers - org belongs to different merchant', array(
                         'org_id' => $org_id,
-                        'error' => $error_message
+                        'error' => $error_message,
+                        'api_key_used_last_4' => substr($api_key_to_use, -4),
+                        'app_id_used' => $app_id_to_use
                     ));
 
-                    // Clear the user's stored data so they can re-register
+                    // Clear all stored data to prevent infinite loops
                     if ($customer_id) {
                         $this->clear_user_monarch_data($customer_id);
                     }
 
+                    // Return a clear error - DO NOT use refresh_required which causes loops
                     wp_send_json_error(array(
-                        'message' => 'Your account needs to be reconnected. Please refresh the page and connect your bank again.',
-                        'action' => 'refresh_required',
+                        'message' => 'This email is registered under a different Monarch merchant account. Please use a different email address.',
+                        'action' => 'email_locked',
                         'cleared' => true
                     ));
                     return;
@@ -1592,13 +1675,26 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
                 'org_id' => $org_id
             ));
 
-            // Get the user's email to call /merchants/verify
+            // Get the email used to register with Monarch (may differ from WP user email)
+            // CRITICAL: Must use the email registered in Monarch, not the WordPress user email
             $user_email = '';
             if ($customer_id) {
-                $user = get_userdata($customer_id);
-                if ($user) {
-                    $user_email = $user->user_email;
+                // First try the stored Monarch-registered email
+                $user_email = get_user_meta($customer_id, '_monarch_registered_email', true);
+
+                // Fallback to WordPress user email only if no Monarch email stored
+                if (empty($user_email)) {
+                    $user = get_userdata($customer_id);
+                    if ($user) {
+                        $user_email = $user->user_email;
+                    }
                 }
+
+                $logger->debug('ajax_get_bank_linking_url: Email for lookup', array(
+                    'monarch_registered_email' => get_user_meta($customer_id, '_monarch_registered_email', true),
+                    'wp_user_email' => get_userdata($customer_id)->user_email ?? '',
+                    'using_email' => $user_email
+                ));
             }
 
             $bank_linking_url = '';
@@ -2008,6 +2104,7 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
         delete_user_meta($customer_id, '_monarch_temp_org_api_key');
         delete_user_meta($customer_id, '_monarch_temp_org_app_id');
         delete_user_meta($customer_id, '_monarch_bank_linking_url');
+        delete_user_meta($customer_id, '_monarch_registered_email');
     }
 
     /**
