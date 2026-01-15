@@ -1226,24 +1226,46 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
 
         // Support both logged in users and guest checkout
         $is_guest = !is_user_logged_in();
-        
+        $customer_id = $is_guest ? 0 : get_current_user_id();
+
         if ($is_guest) {
-            // For guest checkout, get data from session
+            // For guest checkout, get data from session (temp first, then permanent)
             $org_id = WC()->session->get('monarch_temp_org_id');
-        } else {
-            // For logged-in users, get from user meta
-            $customer_id = get_current_user_id();
-            $org_id = get_user_meta($customer_id, '_monarch_temp_org_id', true);
-        }
-        
-        // Get user_id based on user type
-        if ($is_guest) {
+            if (empty($org_id)) {
+                $org_id = WC()->session->get('monarch_org_id');
+            }
             $user_id = WC()->session->get('monarch_temp_user_id');
+            if (empty($user_id)) {
+                $user_id = WC()->session->get('monarch_user_id');
+            }
         } else {
+            // For logged-in users, check temp first, then permanent storage
+            $org_id = get_user_meta($customer_id, '_monarch_temp_org_id', true);
+            if (empty($org_id)) {
+                $org_id = get_user_meta($customer_id, '_monarch_org_id', true);
+            }
             $user_id = get_user_meta($customer_id, '_monarch_temp_user_id', true);
+            if (empty($user_id)) {
+                $user_id = get_user_meta($customer_id, '_monarch_user_id', true);
+            }
         }
-        
+
         $paytoken_id = sanitize_text_field($_POST['paytoken_id']);
+
+        // Check if this is a returning user who already has bank connected
+        // In this case, just save the paytoken and return success
+        if (!$org_id || !$user_id) {
+            // If we have paytoken but no org/user data, this might be a returning user
+            // Try to get org_id from the stored paytoken's org
+            if ($paytoken_id && $customer_id) {
+                $stored_org_id = get_user_meta($customer_id, '_monarch_org_id', true);
+                $stored_user_id = get_user_meta($customer_id, '_monarch_user_id', true);
+                if ($stored_org_id && $stored_user_id) {
+                    $org_id = $stored_org_id;
+                    $user_id = $stored_user_id;
+                }
+            }
+        }
 
         if (!$org_id || !$user_id || !$paytoken_id) {
             wp_send_json_error('Missing organization or paytoken data');
