@@ -326,33 +326,6 @@ class WC_Monarch_ACH_Gateway extends WC_Payment_Gateway {
         $customer_id = $order->get_user_id();
         $is_guest = ($customer_id == 0);
 
-        // Ensure shipping address is saved from checkout form (fixes caching issue for logged-in users)
-        if (isset($_POST['ship_to_different_address']) && $_POST['ship_to_different_address']) {
-            // User wants to ship to a different address - save from form
-            $order->set_shipping_first_name(sanitize_text_field($_POST['shipping_first_name'] ?? ''));
-            $order->set_shipping_last_name(sanitize_text_field($_POST['shipping_last_name'] ?? ''));
-            $order->set_shipping_company(sanitize_text_field($_POST['shipping_company'] ?? ''));
-            $order->set_shipping_address_1(sanitize_text_field($_POST['shipping_address_1'] ?? ''));
-            $order->set_shipping_address_2(sanitize_text_field($_POST['shipping_address_2'] ?? ''));
-            $order->set_shipping_city(sanitize_text_field($_POST['shipping_city'] ?? ''));
-            $order->set_shipping_state(sanitize_text_field($_POST['shipping_state'] ?? ''));
-            $order->set_shipping_postcode(sanitize_text_field($_POST['shipping_postcode'] ?? ''));
-            $order->set_shipping_country(sanitize_text_field($_POST['shipping_country'] ?? ''));
-            $order->save();
-        } elseif (!isset($_POST['ship_to_different_address']) || !$_POST['ship_to_different_address']) {
-            // Ship to billing address - copy billing to shipping
-            $order->set_shipping_first_name($order->get_billing_first_name());
-            $order->set_shipping_last_name($order->get_billing_last_name());
-            $order->set_shipping_company($order->get_billing_company());
-            $order->set_shipping_address_1($order->get_billing_address_1());
-            $order->set_shipping_address_2($order->get_billing_address_2());
-            $order->set_shipping_city($order->get_billing_city());
-            $order->set_shipping_state($order->get_billing_state());
-            $order->set_shipping_postcode($order->get_billing_postcode());
-            $order->set_shipping_country($order->get_billing_country());
-            $order->save();
-        }
-
         try {
             if ($is_guest) {
                 // For guest checkout, get data from session
